@@ -2,33 +2,23 @@
 #define NTRIP_HANDLER_LORA_CODE
 
 #include "functions/Nmea_Handler_LoRa.h"
-#include <LoRaWan_APP.h>
+#include "HardwareSerial.h"
 
 #ifdef NATIVE_BUILD
 #include <ArduinoFake.h>
 #endif
 
-int pushNmeaLoRaToGnss(McpsIndication_t *mcpsIndication) {
+String receiveNmeaFromGnss() {
     #ifdef NATIVE_BUILD
-    auto& nmeaOut = Serial;
+    auto& nmeaIn = Serial;
     #else
-    auto& nmeaOut = Serial1;
+    auto& nmeaIn = Serial1;
     #endif
-    if (mcpsIndication->BufferSize > 0)
-    {
-        if (mcpsIndication->Buffer == nullptr) {
-            nmeaOut.println("[NMEA over LoRA] Loi: Buffer rong!");
-            return -2;
-        }
-
-        nmeaOut.write(mcpsIndication->Buffer, mcpsIndication->BufferSize);
-        nmeaOut.println("[NMEA over LoRA] Da nhan duoc NMEA qua LoRA, da gui den mach RTK!");
-        nmeaOut.println("[NMEA over LoRA] Kich thuoc du lieu: " + String(mcpsIndication->BufferSize) + " bytes");
-        nmeaOut.println("[NMEA over LoRA] Noi dung du lieu: " + String((char*)mcpsIndication->Buffer));
-        return 0;
-    }
-    nmeaOut.println("[NMEA over LoRA] Loi: Buffer co do dai bang 0!");
-    return -1;
+    String nmeaData = nmeaIn.readString();
+    nmeaIn.println("[NMEA over LoRA] Da nhan du lieu NMEA tu mach RTK:");
+    nmeaIn.println(nmeaData);
+    nmeaIn.println();
+    return nmeaData;
 }
 
 #endif

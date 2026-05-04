@@ -48,6 +48,5 @@ extern bool keepNet;
 extern bool isTxConfirmed;
 
 // ================= KHAI BÁO HÀM =================
-extern void downLinkDataHandle(McpsIndication_t *mcpsIndication);
 int loraWanMain();
 #endif

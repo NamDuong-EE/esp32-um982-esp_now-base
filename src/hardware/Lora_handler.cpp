@@ -24,56 +24,14 @@ bool isTxConfirmed = TX_CONFIRMED;
 
 uint32_t appTxDutyCycle = 1000; // 1000ms = 1s
 
-void downLinkDataHandle(McpsIndication_t *mcpsIndication)
+void prepareTxFrame(uint8_t appPort)
 {
-    String slot;
-    switch (mcpsIndication->RxSlot)
+    String nmeaData = receiveNmeaFromGnss();
+    if (nmeaData.length() > 0)
     {
-        case RX_SLOT_WIN_1:
-            slot = "RXWIN1";
-            break;
-        case RX_SLOT_WIN_2:
-            slot = "RXWIN2";
-            break;
-        case RX_SLOT_WIN_CLASS_C:
-            slot = "CLASS_C";
-            break;
-        case RX_SLOT_WIN_PING_SLOT:
-            slot = "PING_SLOT";
-            break;
-        case RX_SLOT_WIN_MULTICAST_SLOT:
-            slot = "MULTICAST_SLOT";
-            break;
-        default:
-            slot = "UNKNOWN";
+        nmeaData.getBytes(appData, LORAWAN_APP_DATA_MAX_SIZE);
+        appDataSize = nmeaData.length() > LORAWAN_APP_DATA_MAX_SIZE ? LORAWAN_APP_DATA_MAX_SIZE : nmeaData.length();
     }
-    Serial.println("+REV DATA:" + slot + 
-        ",RXSIZE " + String(mcpsIndication->BufferSize) + ",PORT " + 
-        String(mcpsIndication->Port)
-    );
-    String bufferHex = "";
-    if (mcpsIndication->Buffer != nullptr && mcpsIndication->BufferSize > 0)
-    {
-        for (uint8_t i = 0; i < mcpsIndication->BufferSize; i++)
-        {
-            if (mcpsIndication->Buffer[i] < 0x10)
-            {
-                bufferHex += "0";
-            }
-            bufferHex += String(mcpsIndication->Buffer[i], HEX);
-        }
-        bufferHex.toUpperCase();
-    }
-    Serial.println("Buffer: " + bufferHex);
-    Serial.println();
-    #if (LoraWan_RGB == 1)
-        uint32_t color = mcpsIndication->Buffer[0] << 16 | mcpsIndication->Buffer[1] << 8 | mcpsIndication->Buffer[2];
-        turnOnRGB(color, 5000);
-        turnOffRGB();
-    #endif
-    #ifndef UNIT_TEST
-    pushNmeaLoRaToGnss(mcpsIndication);
-    #endif
 }
 
 int loraWanMain()
@@ -92,9 +50,15 @@ int loraWanMain()
         case DEVICE_STATE_JOIN:
         {
             LoRaWAN.join();
-            deviceState = DEVICE_STATE_CYCLE;
             break;
         }
+        case DEVICE_STATE_SEND:
+		{
+			prepareTxFrame( appPort );
+			LoRaWAN.send();
+			deviceState = DEVICE_STATE_CYCLE;
+			break;
+		}
         case DEVICE_STATE_CYCLE:
         {
             // Schedule next packet transmission
