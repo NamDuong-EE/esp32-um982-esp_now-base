@@ -1,6 +1,3 @@
-#if (NMEA_COMMUNICATION_PROTOCOL == LORA_SERIAL || NMEA_COMMUNICATION_PROTOCOL == 1)
-#define NTRIP_HANDLER_LORA_CODE
-
 #include "functions/Nmea_Receiver.h"
 #include "HardwareSerial.h"
 
@@ -20,5 +17,3 @@ String receiveNmeaFromGnss() {
     nmeaIn.println();
     return nmeaData;
 }
-
-#endif
