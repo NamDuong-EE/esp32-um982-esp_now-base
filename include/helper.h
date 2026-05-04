@@ -4,6 +4,7 @@
 #include "Top_Lvl_Config.h"
 #include "Prog_Config.h"
 #include <Arduino.h>
+// #include <Arduino_FreeRTOS.h>
 
 #if CONNECT_USING_WIFI
 #include "hardware/Wifi_handler.h"
@@ -31,6 +32,7 @@ extern String targetGGA;
 
 // ================= ĐỊNH NGHĨA CÁC HÀM =================
 int sendDeviceHealth();
-int gnssRoverParseAndMqtt();
+int gnssRoverParse(String& nmeaBuffer);
+int publishGGA(String& nmeaBuffer);
 
 #endif

@@ -1,18 +1,36 @@
 #include "helper.h"
 
 extern String latestGGA;
+static bool nmeaBufferLocked = false;
 
 gga_data_struct ggaData;
 gga_data_struct targetGgaData;
 ksxt_data_struct ksxtData;
 
-int gnssRoverParseAndMqtt()
+int gnssRoverParse(String& nmeaBuffer)
 {
-    String nmeaBuffer = "";
+    if (nmeaBufferLocked)
+    {
+        delay(500);
+        if (nmeaBufferLocked)
+            return 2;
+    }
+
+    parse_start:
     char c = Serial1.read();
     nmeaBuffer += c;
-
     if (c == '\n')
+    {
+        nmeaBufferLocked = true;
+        return 1;
+    }
+    return 0;
+}
+
+int publishGGA(String& nmeaBuffer)
+{
+    begin_publish:
+    if (nmeaBufferLocked)
     {
         nmeaBuffer.trim();
 
@@ -44,6 +62,8 @@ int gnssRoverParseAndMqtt()
             }
             publishRaw(nmeaBuffer, false);
             publishData(jsonPayload, false);
+            nmeaBuffer = "";
+            nmeaBufferLocked = false;
             return 0;
         }
         // Bắt dòng phản hồi lệnh
@@ -51,9 +71,20 @@ int gnssRoverParseAndMqtt()
         {
             Serial.print("[UM980 RESPONSE] ");
             Serial.println(nmeaBuffer);
+            nmeaBuffer = "";
+            nmeaBufferLocked = false;
             return -1;
         }
+        nmeaBuffer = "";
+        nmeaBufferLocked = false;
         return -1;
+    }
+    else
+    {
+        delay(500);
+        if (!nmeaBufferLocked)
+            return 2;
+        goto begin_publish;
     }
 }
 
