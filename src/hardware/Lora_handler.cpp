@@ -1,5 +1,5 @@
 #include "hardware/Lora_handler.h"
-#include "functions/Nmea_Handler_LoRa.h"
+#include "functions/Nmea_Receiver.h"
 
 DeviceClass_t loraWanClass = LORAWAN_CLASS;
 LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;

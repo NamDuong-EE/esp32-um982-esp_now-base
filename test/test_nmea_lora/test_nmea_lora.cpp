@@ -2,7 +2,7 @@
 #include <unity.h>
 
 #include "hardware/Lora_handler.h"
-#include "functions/Nmea_Handler_LoRa.h"
+#include "functions/Nmea_Receiver.h"
 
 /*=========== SETTING UP FAKEIT ============*/
 

@@ -20,7 +20,7 @@ extern TinyGsm modem;
 #include "functions/NTRIP_Handler_IP.h"
 #else
 #include "hardware/Lora_handler.h"
-#include "functions/Nmea_Handler_LoRa.h"
+#include "functions/Nmea_Receiver.h"
 #endif
 
 #include "functions/NMEA_Parser.h"

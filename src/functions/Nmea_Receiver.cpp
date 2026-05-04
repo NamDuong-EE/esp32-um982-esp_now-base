@@ -1,7 +1,7 @@
 #if (NMEA_COMMUNICATION_PROTOCOL == LORA_SERIAL || NMEA_COMMUNICATION_PROTOCOL == 1)
 #define NTRIP_HANDLER_LORA_CODE
 
-#include "functions/Nmea_Handler_LoRa.h"
+#include "functions/Nmea_Receiver.h"
 #include "HardwareSerial.h"
 
 #ifdef NATIVE_BUILD
