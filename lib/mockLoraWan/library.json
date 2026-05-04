@@ -1,0 +1,10 @@
+{
+  "name": "mockLoraWan",
+  "version": "0.0.1",
+  "description": "Mock LoRaWAN API for unit testing on native",
+  "build": {
+    "libCompatMode": "off"
+  },
+  "frameworks": ["arduino"],
+  "platforms": ["native", "espressif32"]
+}
