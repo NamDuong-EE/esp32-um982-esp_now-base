@@ -1,4 +1,5 @@
 {
     "C_Cpp.default.cppStandard": "gnu++17",
-    "C_Cpp.default.cStandard": "gnu17"
+    "C_Cpp.default.cStandard": "gnu17",
+    "sonarlint.pathToCompileCommands": "${workspaceFolder}/compile_commands.json"
 }

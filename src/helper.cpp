@@ -21,8 +21,7 @@ int publishGGA(String &nmeaBuffer)
         String jsonPayload = "";
         if (nmeaBuffer.startsWith("$KSXT"))
         {
-            bool parseOk = parseKSXT_toStruct(nmeaBuffer, ksxtData);
-            if (parseOk)
+            if (bool parseOk = parseKSXT_toStruct(nmeaBuffer, ksxtData))
             {
                 jsonPayload = parseKSXT_toJSON(ksxtData);
             }
@@ -31,8 +30,7 @@ int publishGGA(String &nmeaBuffer)
         else if (nmeaBuffer.startsWith("$GNGGA"))
         {
             publishRaw(nmeaBuffer, true);
-            bool parseOk = parseGGA_toStruct(nmeaBuffer, ggaData);
-            if (parseOk)
+            if (bool parseOk = parseGGA_toStruct(nmeaBuffer, ggaData))
             {
                 jsonPayload = parseGGA_toJSON(ggaData);
             }
@@ -78,17 +76,19 @@ String formDeviceHealthString()
     bool gnssOk = (latestGGA.length() > 10); // Nếu có chuỗi NMEA hợp lệ
 
     // 2. Đóng gói thành JSON
-    char healthPayload[256];
-    snprintf(healthPayload, sizeof(healthPayload),
-             "{\"uptime_s\":%lu,\"free_heap_bytes\":%u,\"connected_via\":\"%s\",\"rssi_dbm\":%d,\"mqtt_ok\":%s,\"ntrip_ok\":%s,\"gnss_data_ok\":%s}",
-             uptime_s, freeHeap, connected_via, rssi,
-             mqttOk ? "true" : "false",
-             ntripOk ? "true" : "false",
-             gnssOk ? "true" : "false");
+    std::string healthPayload = "{";
+    healthPayload += "\"uptime_s\":" + std::to_string(uptime_s);
+    healthPayload += ",\"free_heap_bytes\":" + std::to_string(freeHeap);
+    healthPayload += R"(,"connected_via":")" + std::string(connected_via.c_str()) + "\"";
+    healthPayload += ",\"rssi_dbm\":" + std::to_string(rssi);
+    healthPayload += ",\"mqtt_ok\":" + std::string(mqttOk ? "true" : "false");
+    healthPayload += ",\"ntrip_ok\":" + std::string(ntripOk ? "true" : "false");
+    healthPayload += ",\"gnss_data_ok\":" + std::string(gnssOk ? "true" : "false");
+    healthPayload += "}";
     /*Xóa tọa độ sau khi đã dùng để đánh giá sức khoẻ, nếu còn giữ, 
     trong trường hợp không có dữ liệu mới, sẽ luôn báo GNSS OK dù 
     thực tế đã mất tín hiệu. Việc này giúp phản ánh tình trạng thực tế hơn.*/ 
     latestGGA = "";
     // 3. Trả về payload để có thể log hoặc dùng cho mục đích khác nếu cần
-    return String(healthPayload);
+    return String(healthPayload.c_str());
 }
