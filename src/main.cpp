@@ -16,10 +16,10 @@ SemaphoreHandle_t nmeaBufferMutex = nullptr;
 
 /* ===================== NGUYÊN MẪU HÀM ======================== */
 
-void taskNmea(void* parameter);
-void gnssParseTask(void* parameter);
-void gnssPublishTask(void* parameter);
-void healthCheckTask(void* parameter);
+__attribute__((noreturn))  void taskNmea(void* parameter);
+__attribute__((noreturn)) void gnssParseTask(void* parameter);
+__attribute__((noreturn)) void gnssPublishTask(void* parameter);
+__attribute__((noreturn)) void healthCheckTask(void* parameter);
 
 /* ==================SETUP VÀ LOOP======================== */
 

@@ -1,6 +1,7 @@
 #include "functions/NMEA_Parser.h"
+#include <string>
 
-double nmeaToDecimal(String nmeaPos, String dir) {
+double nmeaToDecimal(String const &nmeaPos, String const &dir) {
   if (nmeaPos.length() < 4) return 0.0;
   int dotIndex = nmeaPos.indexOf('.');
   if (dotIndex < 2) return 0.0; 
@@ -11,21 +12,21 @@ double nmeaToDecimal(String nmeaPos, String dir) {
   return decimal;
 }
 
-String parseGGA_toJSON(gga_data_struct ggaData) {
-  char jsonPayload[128];
-  snprintf(jsonPayload, sizeof(jsonPayload), 
-            "{\"lat\":%.7f,\"lon\":%.7f,\"rtk_status\":%s,\"satellites\":%s}", 
-            ggaData.lat, ggaData.lon, ggaData.rtk_status.c_str(), ggaData.satellites.c_str());
-            
-  return String(jsonPayload);
+String parseGGA_toJSON(gga_data_struct const &ggaData) {
+  std::string jsonPayload(128, '\0');
+  snprintf(&jsonPayload[0], jsonPayload.size(),
+           R"({"lat":%.7f,"lon":%.7f,"rtk_status":%s,"satellites":%s})",
+           ggaData.lat, ggaData.lon, ggaData.rtk_status.c_str(), ggaData.satellites.c_str());
+  return String(jsonPayload.c_str());
 }
 
 boolean parseGGA_toStruct(String ggaMsg, gga_data_struct &ggaData) {
-  int comma[15];
+  std::array<int, 15> comma{};
   int count = 0;
   for (int i = 0; i < ggaMsg.length(); i++) {
     if (ggaMsg[i] == ',') {
-      comma[count++] = i;
+      comma[count] = i;
+      count++;
       if (count >= 15) break;
     }
   }
@@ -38,7 +39,7 @@ boolean parseGGA_toStruct(String ggaMsg, gga_data_struct &ggaData) {
     String rtkStr = ggaMsg.substring(comma[5] + 1, comma[6]);
     String satStr = ggaMsg.substring(comma[6] + 1, comma[7]);
 
-    if (latStr.length() > 0 && lonStr.length() > 0) {
+    if (!latStr.isEmpty() && !lonStr.isEmpty()) {
       double latDD = nmeaToDecimal(latStr, latDir);
       double lonDD = nmeaToDecimal(lonStr, lonDir);
       
@@ -53,20 +54,21 @@ boolean parseGGA_toStruct(String ggaMsg, gga_data_struct &ggaData) {
   return false;
 }
 
-String parseKSXT_toJSON(ksxt_data_struct ksxtData) {
-  char jsonPayload[192];
-  snprintf(jsonPayload, sizeof(jsonPayload), 
-           "{\"height_m\":%.2f,\"heading_deg\":%.2f,\"pitch_deg\":%.2f,\"roll_deg\":%.2f,\"velocity_kmh\":%.2f}", 
+String parseKSXT_toJSON(ksxt_data_struct const &ksxtData) {
+  std::string jsonPayload(192, '\0');
+  snprintf(&jsonPayload[0], jsonPayload.size(),
+           R"({"height_m":%.2f,"heading_deg":%.2f,"pitch_deg":%.2f,"roll_deg":%.2f,"velocity_kmh":%.2f})",
            ksxtData.height_m, ksxtData.heading_deg, ksxtData.pitch_deg, ksxtData.roll_deg, ksxtData.velocity_kmh);
-  return String(jsonPayload);
+  return String(jsonPayload.c_str());
 }
 
 boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_struct &ksxtData) {
-  int comma[22];
+  std::array<int, 22> comma{};
   int count = 0;
   for (int i = 0; i < ksxtMsg.length(); i++) {
     if (ksxtMsg[i] == ',') {
-      comma[count++] = i;
+      comma[count] = i;
+      count++;
       if (count >= 22) break;
     }
   }
@@ -79,8 +81,8 @@ boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_struct &ksxtData) {
     String rollStr = ksxtMsg.substring(comma[8] + 1, comma[9]);
     
 
-    if (heightStr.length() > 0 && headingStr.length() > 0
-        && pitchStr.length() > 0 && rollStr.length() > 0 && veloStr.length() > 0) {
+    if (!heightStr.isEmpty() && !headingStr.isEmpty()
+        && !pitchStr.isEmpty() && !rollStr.isEmpty() && !veloStr.isEmpty()) {
       double heightDD = heightStr.toDouble();
       double headingDD = headingStr.toDouble();
       double pitchDD = pitchStr.toDouble();

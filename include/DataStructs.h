@@ -9,11 +9,11 @@ typedef struct {
 } gga_data_struct;
 
 typedef struct {
-  String height_m;
-  String heading_deg;
-  String pitch_deg;
-  String roll_deg;
-  String velocity_kmh;
+  double height_m;
+  double heading_deg;
+  double pitch_deg;
+  double roll_deg;
+  double velocity_kmh;
 } ksxt_data_struct;
 
 #endif

@@ -12,7 +12,7 @@ bool setupWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempt = 0;
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFiClass::status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
     if (++attempt > 10) {

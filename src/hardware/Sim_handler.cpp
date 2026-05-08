@@ -21,7 +21,7 @@ bool startSIM() {
     modem.restart();
     #endif
     String modemInfo = modem.getModemInfo();
-    while (modemInfo.length() == 0) {
+    while (modemInfo.isEmpty()) {
         if (retrys > 10) {
             SerialMon.println("[GSM] Lay thong tin modem that bai sau nhieu lan thu ! Khoi dong modem that bai !");
             return false;

@@ -27,10 +27,10 @@ uint32_t appTxDutyCycle = 1000; // 1000ms = 1s
 void prepareTxFrame(uint8_t appPort)
 {
     String nmeaData = receiveNmeaFromGnss();
-    if (nmeaData.length() > 0)
+    if (!nmeaData.isEmpty())
     {
         nmeaData.getBytes(appData, LORAWAN_APP_DATA_MAX_SIZE);
-        appDataSize = nmeaData.length() > LORAWAN_APP_DATA_MAX_SIZE ? LORAWAN_APP_DATA_MAX_SIZE : nmeaData.length();
+        appDataSize = nmeaData.length() > LORAWAN_APP_DATA_MAX_SIZE ? LORAWAN_APP_DATA_MAX_SIZE : (uint8_t)nmeaData.length();
     }
 }
 
