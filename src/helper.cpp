@@ -2,9 +2,9 @@
 
 extern String latestGGA;
 
-gga_data_struct ggaData;
-gga_data_struct targetGgaData;
-ksxt_data_struct ksxtData;
+gga_data_t ggaData;
+gga_data_t targetGgaData;
+ksxt_data_t ksxtData;
 
 
 int publishGGA(String &nmeaBuffer)

@@ -12,7 +12,7 @@ double nmeaToDecimal(String const &nmeaPos, String const &dir) {
   return decimal;
 }
 
-String parseGGA_toJSON(gga_data_struct const &ggaData) {
+String parseGGA_toJSON(gga_data_t const &ggaData) {
   std::string jsonPayload(128, '\0');
   snprintf(&jsonPayload[0], jsonPayload.size(),
            R"({"lat":%.7f,"lon":%.7f,"rtk_status":%s,"satellites":%s})",
@@ -20,7 +20,7 @@ String parseGGA_toJSON(gga_data_struct const &ggaData) {
   return String(jsonPayload.c_str());
 }
 
-boolean parseGGA_toStruct(String ggaMsg, gga_data_struct &ggaData) {
+boolean parseGGA_toStruct(String ggaMsg, gga_data_t &ggaData) {
   std::array<int, 15> comma{};
   int count = 0;
   for (int i = 0; i < ggaMsg.length(); i++) {
@@ -54,7 +54,7 @@ boolean parseGGA_toStruct(String ggaMsg, gga_data_struct &ggaData) {
   return false;
 }
 
-String parseKSXT_toJSON(ksxt_data_struct const &ksxtData) {
+String parseKSXT_toJSON(ksxt_data_t const &ksxtData) {
   std::string jsonPayload(192, '\0');
   snprintf(&jsonPayload[0], jsonPayload.size(),
            R"({"height_m":%.2f,"heading_deg":%.2f,"pitch_deg":%.2f,"roll_deg":%.2f,"velocity_kmh":%.2f})",
@@ -62,7 +62,7 @@ String parseKSXT_toJSON(ksxt_data_struct const &ksxtData) {
   return String(jsonPayload.c_str());
 }
 
-boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_struct &ksxtData) {
+boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_t &ksxtData) {
   std::array<int, 22> comma{};
   int count = 0;
   for (int i = 0; i < ksxtMsg.length(); i++) {
