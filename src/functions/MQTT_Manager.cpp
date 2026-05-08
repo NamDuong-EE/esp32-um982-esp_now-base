@@ -61,20 +61,26 @@ int connectMQTT() {
   return 0;
 }
 
-// int loopMQTT() {
-//   connectMQTT();
-//   mqtt.loop();
-//   return 0;
-// }
-
 int publishData(String payload, bool isGGA) {
   if (mqtt.connected() && payload.length() > 0) {
     Serial.print("[MQTT UPLINK] ");
     Serial.println(payload);
     if (isGGA)
+    {
       mqtt.publish(TOPIC_PUB_DATA_GGA, payload.c_str());
+      #if PROGRAM_DEBUG
+      Serial.println("[MQTT UPLINK] Da publish du lieu GGA len topic: ");
+      Serial.println(TOPIC_PUB_DATA_GGA);
+      #endif
+    }
     else
+    {
       mqtt.publish(TOPIC_PUB_DATA_KSXT, payload.c_str());
+      #if PROGRAM_DEBUG
+      Serial.println("[MQTT UPLINK] Da publish du lieu KSXT len topic: ");
+      Serial.println(TOPIC_PUB_DATA_KSXT);
+      #endif
+    }
     return 0;
   }
   return -1;
@@ -82,13 +88,12 @@ int publishData(String payload, bool isGGA) {
 
 int publishRaw(String payload, bool isGGA) {
   if (mqtt.connected() && payload.length() > 0) {
-    Serial.print("[UM982 GNSS RAW DATA] ");
-    Serial.println(payload);
     if (isGGA) {
       mqtt.publish(TOPIC_PUB_RAW_GGA, payload.c_str());
     } else {
       mqtt.publish(TOPIC_PUB_RAW_KSXT, payload.c_str());
     }
+    Serial.println("[UM982 GNSS RAW DATA] Da publish thanh cong !");
     return 0;
   }
   return -1;

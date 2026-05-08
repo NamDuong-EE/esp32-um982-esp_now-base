@@ -6,22 +6,6 @@ gga_data_struct ggaData;
 gga_data_struct targetGgaData;
 ksxt_data_struct ksxtData;
 
-int roverReadCharFromRtk(String &nmeaBuffer)
-{
-
-parse_start:
-    char c = Serial1.read();
-    nmeaBuffer += c;
-    if (c == '\n')
-    {
-        return 1;
-    }
-    if (c == NULL)
-    {
-        return 2;
-    }
-    return 0;
-}
 
 int publishGGA(String &nmeaBuffer)
 {

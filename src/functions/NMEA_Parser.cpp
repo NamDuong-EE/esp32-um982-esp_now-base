@@ -62,21 +62,22 @@ String parseKSXT_toJSON(ksxt_data_struct ksxtData) {
 }
 
 boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_struct &ksxtData) {
-  int comma[23];
+  int comma[22];
   int count = 0;
   for (int i = 0; i < ksxtMsg.length(); i++) {
     if (ksxtMsg[i] == ',') {
       comma[count++] = i;
-      if (count >= 23) break;
+      if (count >= 22) break;
     }
   }
 
   if (count >= 14) {
-    String heightStr = ksxtMsg.substring(comma[4] + 1, comma[5]);
-    String headingStr = ksxtMsg.substring(comma[5] + 1, comma[6]);
-    String pitchStr = ksxtMsg.substring(comma[6] + 1, comma[7]);
-    String rollStr = ksxtMsg.substring(comma[7] + 1, comma[8]);
-    String veloStr = ksxtMsg.substring(comma[8] + 1, comma[9]);
+    String heightStr = ksxtMsg.substring(comma[3] + 1, comma[4]);
+    String headingStr = ksxtMsg.substring(comma[4] + 1, comma[5]);
+    String pitchStr = ksxtMsg.substring(comma[5] + 1, comma[6]);
+    String veloStr = ksxtMsg.substring(comma[7] + 1, comma[8]);
+    String rollStr = ksxtMsg.substring(comma[8] + 1, comma[9]);
+    
 
     if (heightStr.length() > 0 && headingStr.length() > 0
         && pitchStr.length() > 0 && rollStr.length() > 0 && veloStr.length() > 0) {
