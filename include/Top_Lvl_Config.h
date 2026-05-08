@@ -5,6 +5,8 @@
 #define TOP_LVL_CONFIG_H
 
 // ================= CẤU HÌNH KHỞI TẠO =================
+#define PROGRAM_DEBUG 0
+
 #ifndef WIFI_LORA_32_V4
 #define WIFI_LORA_32_V4
 #endif

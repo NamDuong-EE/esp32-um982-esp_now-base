@@ -48,25 +48,24 @@ int connectMQTT() {
     Serial.println("\n[MQTT] Dang ket noi Broker...");
     String clientId = "ESP32_GW_" + String(random(0xffff), HEX);
     if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
-      Serial.println("[MQTT] Da ket noi!");
+      Serial.println("[MQTT] Da ket noi thanh cong!");
       mqtt.subscribe(TOPIC_SUB_CMD);
       return 0;
     } else {
       Serial.print("[MQTT] Loi rc=");
       Serial.print(mqtt.state());
       Serial.println(" -> Thu lai sau 5s");
-      delay(5000);
       return -1;
     }
   }
   return 0;
 }
 
-int loopMQTT() {
-  connectMQTT();
-  mqtt.loop();
-  return 0;
-}
+// int loopMQTT() {
+//   connectMQTT();
+//   mqtt.loop();
+//   return 0;
+// }
 
 int publishData(String payload, bool isGGA) {
   if (mqtt.connected() && payload.length() > 0) {
@@ -96,13 +95,10 @@ int publishRaw(String payload, bool isGGA) {
 }
 
 int publishHealth(String payload) {
-  if (mqtt.connected() && payload.length() > 0) {
-    Serial.print("[MQTT HEALTH] ");
-    Serial.println(payload);
-    mqtt.publish(TOPIC_PUB_HEALTH, payload.c_str());
-    return 0;
-  }
-  return -1;
+  mqtt.publish(TOPIC_PUB_HEALTH, payload.c_str());
+  Serial.print("[MQTT] Da gui thong tin suc khoe len topic: ");
+  Serial.println(TOPIC_PUB_HEALTH);
+  return 0;
 }
 
 bool isMqttConnected() {

@@ -17,7 +17,8 @@ extern PubSubClient mqtt;
 // ================= KHAI BÁO HÀM =================
 
 int setupMQTT();
-int loopMQTT();
+// int loopMQTT();
+int connectMQTT();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 int publishData(String payload, bool isGGA);
 int publishRaw(String payload, bool isGGA);

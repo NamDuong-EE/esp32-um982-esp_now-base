@@ -77,6 +77,7 @@ int connectNTRIP() {
 }
 
 int loopNTRIP(String currentGGA) {
+  // không sử dụng tài nguyên chung, không cần mutex
   int returnCode = NTRIP_MODE; // returnCode = NTRIP_MODE + ntripClient.available() * 4
 #ifdef UNIT_TEST
   auto& ntripOutput = Serial;

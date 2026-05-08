@@ -29,10 +29,11 @@ extern TinyGsm modem;
 // ================= ĐỊNH NGHĨA CÁC BIẾN TOÀN CỤC =================
 extern String latestGGA;
 extern String targetGGA;
+extern bool mqttHealthMode;
 
 // ================= ĐỊNH NGHĨA CÁC HÀM =================
-int sendDeviceHealth();
-int gnssRoverParse(String& nmeaBuffer);
+String formDeviceHealthString();
+int roverReadCharFromRtk(String& nmeaBuffer);
 int publishGGA(String& nmeaBuffer);
 
 #endif
