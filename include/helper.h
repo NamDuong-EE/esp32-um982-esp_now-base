@@ -4,7 +4,6 @@
 #include "Top_Lvl_Config.h"
 #include "Prog_Config.h"
 #include <Arduino.h>
-// #include <Arduino_FreeRTOS.h>
 
 #if CONNECT_USING_WIFI
 #include "hardware/Wifi_handler.h"
@@ -20,7 +19,7 @@ extern TinyGsm modem;
 #include "functions/NTRIP_Handler_IP.h"
 #else
 #include "hardware/Lora_handler.h"
-#include "functions/Nmea_Receiver.h"
+#include "functions/RTCM_Receiver.h"
 #endif
 
 #include "functions/NMEA_Parser.h"
@@ -33,6 +32,6 @@ extern bool mqttHealthMode;
 
 // ================= ĐỊNH NGHĨA CÁC HÀM =================
 String formDeviceHealthString();
-int publishGGA(String& nmeaBuffer);
+int publishGGA(String& rtcmBuffer);
 
 #endif

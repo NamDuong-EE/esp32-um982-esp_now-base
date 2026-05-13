@@ -1,5 +1,5 @@
 #include "hardware/Lora_handler.h"
-#include "functions/Nmea_Receiver.h"
+#include "functions/RTCM_Receiver.h"
 
 DeviceClass_t loraWanClass = LORAWAN_CLASS;
 LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
@@ -24,14 +24,14 @@ bool isTxConfirmed = TX_CONFIRMED;
 
 uint32_t appTxDutyCycle = 1000; // 1000ms = 1s
 
+
+extern String rtcmBuffer;
+
 void prepareTxFrame(uint8_t appPort)
 {
-    String nmeaData = receiveNmeaFromGnss();
-    if (!nmeaData.isEmpty())
-    {
-        nmeaData.getBytes(appData, LORAWAN_APP_DATA_MAX_SIZE);
-        appDataSize = nmeaData.length() > LORAWAN_APP_DATA_MAX_SIZE ? LORAWAN_APP_DATA_MAX_SIZE : (uint8_t)nmeaData.length();
-    }
+    rtcmBuffer.getBytes(appData, LORAWAN_APP_DATA_MAX_SIZE);
+    appDataSize = rtcmBuffer.length() > LORAWAN_APP_DATA_MAX_SIZE ? LORAWAN_APP_DATA_MAX_SIZE : (uint8_t)rtcmBuffer.length();
+    printf("[LORAWAN] Du lieu RTCM duoc gui: %s\n", rtcmBuffer.c_str());
 }
 
 int loraWanMain()
@@ -43,17 +43,27 @@ int loraWanMain()
     #if (LORAWAN_DEVEUI_AUTO)
             LoRaWAN.generateDeveuiByChipID();
     #endif
+    #ifdef PROGRAM_DEBUG
+            Serial.println("[LORAWAN] Khoi tao LoRaWAN...");
+    #endif
             LoRaWAN.init(loraWanClass, loraWanRegion);
             LoRaWAN.setDefaultDR(3);
             break;
         }
         case DEVICE_STATE_JOIN:
         {
+    #ifdef PROGRAM_DEBUG
+            Serial.println("[LORAWAN] Tham gia mang LoRaWAN...");
+    #endif
             LoRaWAN.join();
+            deviceState = DEVICE_STATE_CYCLE;
             break;
         }
         case DEVICE_STATE_SEND:
 		{
+    #ifdef PROGRAM_DEBUG
+            Serial.println("[LORAWAN] Gui du lieu...");
+    #endif
 			prepareTxFrame( appPort );
 			LoRaWAN.send();
 			deviceState = DEVICE_STATE_CYCLE;
@@ -61,6 +71,9 @@ int loraWanMain()
 		}
         case DEVICE_STATE_CYCLE:
         {
+    #ifdef PROGRAM_DEBUG
+            Serial.println("[LORAWAN] Vao chu ky...");
+    #endif
             // Schedule next packet transmission
             txDutyCycleTime = appTxDutyCycle;
             LoRaWAN.cycle(txDutyCycleTime);
@@ -69,6 +82,9 @@ int loraWanMain()
         }
         case DEVICE_STATE_SLEEP:
         {
+    #ifdef PROGRAM_DEBUG
+            Serial.println("[LORAWAN] Vao che do ngu...");
+    #endif
             LoRaWAN.sleep(loraWanClass);
             break;
         }

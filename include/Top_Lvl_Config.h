@@ -5,14 +5,14 @@
 #define TOP_LVL_CONFIG_H
 
 // ================= CẤU HÌNH KHỞI TẠO =================
-#define PROGRAM_DEBUG 0
+#define PROGRAM_DEBUG 1
 
 #ifndef WIFI_LORA_32_V4
 #define WIFI_LORA_32_V4
 #endif
 
 #ifndef LORAWAN_DEBUG_LEVEL
-#define LORAWAN_DEBUG_LEVEL 0
+#define LORAWAN_DEBUG_LEVEL 1
 #endif
 
 #ifndef CONNECT_USING_WIFI

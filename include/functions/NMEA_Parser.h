@@ -12,7 +12,4 @@ double nmeaToDecimal(String const &nmeaPos, String const &dir);
 String parseGGA_toJSON(gga_data_t const &ggaData);
 boolean parseGGA_toStruct(String ggaMsg, gga_data_t &ggaData);
 
-String parseKSXT_toJSON(ksxt_data_t const &ksxtData);
-boolean parseKSXT_toStruct(String ksxtMsg, ksxt_data_t &ksxtData);
-
 #endif

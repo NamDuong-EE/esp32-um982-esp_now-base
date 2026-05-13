@@ -4,51 +4,37 @@ extern String latestGGA;
 
 gga_data_t ggaData;
 gga_data_t targetGgaData;
-ksxt_data_t ksxtData;
 
 
-int publishGGA(String &nmeaBuffer)
+int publishGGA(String &rtcmBuffer)
 {
-    nmeaBuffer.trim();
+    rtcmBuffer.trim();
 
     // Bắt dòng tọa độ
-    if (nmeaBuffer.startsWith("$GNGGA") || nmeaBuffer.startsWith("$GPGGA") || nmeaBuffer.startsWith("$KSXT"))
+    if (rtcmBuffer.startsWith("$GNGGA") || rtcmBuffer.startsWith("$GPGGA") || rtcmBuffer.startsWith("$KSXT"))
     {
         // Cập nhật tọa độ mới nhất để NTRIP dùng xác thực (Mode 3)
-        latestGGA = nmeaBuffer;
+        latestGGA = rtcmBuffer;
 
         // Đẩy lên MQTT
         String jsonPayload = "";
-        if (nmeaBuffer.startsWith("$KSXT"))
+        if (rtcmBuffer.startsWith("$GPGGA"))
         {
-            if (bool parseOk = parseKSXT_toStruct(nmeaBuffer, ksxtData))
-            {
-                jsonPayload = parseKSXT_toJSON(ksxtData);
-            }
-            publishData(jsonPayload, false);
+            publishRaw(rtcmBuffer, true);
         }
-        else if (nmeaBuffer.startsWith("$GNGGA"))
-        {
-            publishRaw(nmeaBuffer, true);
-            if (bool parseOk = parseGGA_toStruct(nmeaBuffer, ggaData))
-            {
-                jsonPayload = parseGGA_toJSON(ggaData);
-            }
-            publishData(jsonPayload, true);
-        }
-        nmeaBuffer = "";
+        rtcmBuffer = "";
         return 0;
     }
     // Bắt dòng phản hồi lệnh
-    else if (nmeaBuffer.startsWith("#"))
+    else if (rtcmBuffer.startsWith("#"))
     {
         Serial.print("[UM980 RESPONSE] ");
-        Serial.println(nmeaBuffer);
-        nmeaBuffer = "";
+        Serial.println(rtcmBuffer);
+        rtcmBuffer = "";
         return -1;
     }
-    nmeaBuffer = "";
-    return -1;
+    rtcmBuffer = "";
+    return -2;
 }
 
 String formDeviceHealthString()

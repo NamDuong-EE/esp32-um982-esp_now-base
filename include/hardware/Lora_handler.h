@@ -47,6 +47,8 @@ extern bool loraWanAdr;
 extern bool keepNet;
 extern bool isTxConfirmed;
 
+extern String rtcmBuffer;
+
 // ================= KHAI BÁO HÀM =================
 int loraWanMain();
 #endif

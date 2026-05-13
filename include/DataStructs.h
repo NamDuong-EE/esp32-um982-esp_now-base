@@ -9,13 +9,4 @@ struct gga_data_struct {
 };
 using gga_data_t = struct gga_data_struct;
 
-struct ksxt_data_struct {
-  double height_m;
-  double heading_deg;
-  double pitch_deg;
-  double roll_deg;
-  double velocity_kmh;
-};
-using ksxt_data_t = struct ksxt_data_struct;
-
 #endif
