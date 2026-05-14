@@ -20,12 +20,12 @@
 #include "Arduino.h"
 #include "Prog_Config.h"
 
-inline constexpr char RX_TIMEOUT_VALUE = 1000;
-inline constexpr char BUFFER_SIZE = 256; // Define the payload size here
+inline constexpr int RX_TIMEOUT_VALUE = 1000;
+inline constexpr uint8_t BUFFER_SIZE = 255; // Define the payload size here
 
 static RadioEvents_t RadioEvents;
 void OnTxDone( void );
 void OnTxTimeout( void );
-void loraSend(char* txData);
+void loraSend(char* txData, int length);
 int loraSetup();
 #endif

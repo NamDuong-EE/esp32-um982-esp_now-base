@@ -31,22 +31,22 @@ inline constexpr char GPRS_PASS[] = "";
 #endif
 
 // ================ CẤU HÌNH LORA =================
-inline constexpr char RF_FREQUENCY = 915000000; // Hz
-inline constexpr char TX_OUTPUT_POWER = 5;        // dBm
-inline constexpr char LORA_BANDWIDTH = 0;         // [0: 125 kHz,
+inline constexpr int RF_FREQUENCY = 915000000; // Hz
+inline constexpr int TX_OUTPUT_POWER = 5;        // dBm
+inline constexpr int LORA_BANDWIDTH = 0;         // [0: 125 kHz,
                                                               //  1: 250 kHz,
                                                               //  2: 500 kHz,
                                                               //  3: Reserved]
-inline constexpr char LORA_SPREADING_FACTOR = 7;         // [SF7..SF12]
-inline constexpr char LORA_CODINGRATE = 1;         // [1: 4/5,
+inline constexpr int LORA_SPREADING_FACTOR = 7;         // [SF7..SF12]
+inline constexpr int LORA_CODINGRATE = 1;         // [1: 4/5,
                                                               //  2: 4/6,
                                                               //  3: 4/7,
                                                               //  4: 4/8]
-inline constexpr char LORA_PREAMBLE_LENGTH = 8;         // Same for Tx and Rx
-inline constexpr char LORA_SYMBOL_TIMEOUT = 0;         // Symbols
-inline constexpr char LORA_FIX_LENGTH_PAYLOAD_ON = false;
-inline constexpr char LORA_IQ_INVERSION_ON = false;
-inline constexpr char LORA_TX_TIMEOUT = 3000;         // ms
+inline constexpr int LORA_PREAMBLE_LENGTH = 8;         // Same for Tx and Rx
+inline constexpr int LORA_SYMBOL_TIMEOUT = 0;         // Symbols
+inline constexpr bool LORA_FIX_LENGTH_PAYLOAD_ON = false;
+inline constexpr bool LORA_IQ_INVERSION_ON = false;
+inline constexpr int LORA_TX_TIMEOUT = 3000;         // ms
 
 // ================= CẤU HÌNH NTRIP =================
 inline constexpr int NTRIP_MODE = 3; // 1: Chỉ gửi GGA khi có yêu cầu; 2: Gửi GGA mỗi khi có thay đổi; 3: Gửi GGA đều đặn mỗi 10s

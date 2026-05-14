@@ -131,22 +131,43 @@ __attribute__((noreturn))void taskLora(void* parameter) {
             #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
             loopNTRIP(latestGGA);
             #else
-            if (!rtcmBuffer.isEmpty()) {
-                Serial.println("[LORA TASK] Chuan bi truyen du lieu RTCM qua LoRA...");
-                rtcmCharArray = new char[rtcmBuffer.length() + 1];
-                rtcmBuffer.toCharArray(rtcmCharArray, rtcmBuffer.length() + 1);
-                loraSend(rtcmCharArray);
-                Serial.printf("[LORA TASK] Da truyen du lieu RTCM qua LoRa. So byte: %d\n", strlen(rtcmCharArray));
-                delete[] rtcmCharArray;
-                rtcmCharArray = nullptr;
-                latestRtcm = rtcmBuffer; // Cập nhật chuỗi RTCM mới nhất đã gửi đi
-                rtcmBuffer = ""; // Dọn buffer sau khi gửi
-                Serial.println("[LORA TASK] Da xoa du lieu RTCM trong buffer sau khi gui.");
-            }
-            else {
+            if (rtcmBuffer.isEmpty()) {
                 Serial.println("[LORA TASK] Chua co du lieu RTCM de truyen qua LoRa.");
+                goto giveUpMutex;
             }
+
+            Serial.println("[LORA TASK] Chuan bi truyen du lieu RTCM qua LoRA...");
+
+            Serial.println("[LORA TASK] Noi dung duoc in ra theo hexa:");
+
+            for (int i = 0; i < rtcmBuffer.length(); i++) {
+                Serial.printf("%02X ", static_cast<uint8_t>(rtcmBuffer[i]));
+
+                if ((i + 1) % 16 == 0) {
+                    Serial.println();
+                }
+            }
+
+            Serial.println();
+
+            rtcmCharArray = new char[rtcmBuffer.length() + 1];
+            for (int i = 0; i < rtcmBuffer.length(); i++) {
+                rtcmCharArray[i] = rtcmBuffer[i];
+            }
+
+            loraSend(rtcmCharArray, rtcmBuffer.length());
+            Serial.printf("[LORA TASK] Da truyen du lieu RTCM qua LoRa.\n");
+
+            delete[] rtcmCharArray;
+            rtcmCharArray = nullptr;
+
+            latestRtcm = rtcmBuffer; // Cập nhật chuỗi RTCM mới nhất đã gửi đi
+            rtcmBuffer = ""; // Dọn buffer sau khi gửi
+
+            Serial.println("[LORA TASK] Da xoa du lieu RTCM trong buffer sau khi gui.");
             #endif
+
+            giveUpMutex:
             xSemaphoreGive(rtcmBufferMutex);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));

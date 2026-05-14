@@ -24,16 +24,65 @@ int loraSetup( void ) {
     return 0;
 }
 
-void loraSend(char* txData)
+void loraSend(char* txData, int length)
 {
 	if(lora_idle == true)
 	{
 		txNumber += 0.01;
 
-        Serial.printf("[LoRa] Noi dung \"%s\" , do dai: %d\r\n", txData, strlen(txData));
+        Serial.printf("[LoRa] Chuan bi gui du lieu co do dai: %d byte.\r\n", length);
+
+        Serial.println("[LoRa] Noi dung duoc in ra theo hexa:");
+
+        for (int i = 0; i < length; i++) {
+            Serial.printf("%02X ", static_cast<uint8_t>(txData[i]));
+
+            if ((i + 1) % 16 == 0) {
+                Serial.println();
+            }
+        }
+
+        Serial.println();
+
+        if (length > BUFFER_SIZE) {
+            Serial.println("[LoRa] Do dai du lieu vuot qua BUFFER_SIZE, se phan doan thanh nhieu goi!");
+        }
+
+        while (length > BUFFER_SIZE) {
+            Radio.Send( (uint8_t *)txData, BUFFER_SIZE );
+            txData += BUFFER_SIZE;
+            length -= BUFFER_SIZE;
+            Serial.printf("[LoRa] Da gui %d byte, con lai: %d\r\n", BUFFER_SIZE, length);
+
+            Serial.println("[LoRa] Noi dung doan duoc in ra theo hexa: ");
+
+            for (int i = 0; i < length; i++) {
+                Serial.printf("%02X ", static_cast<uint8_t>(txData[i]));
+
+                if ((i + 1) % 16 == 0) {
+                    Serial.println();
+                }
+            }
+
+            Serial.println();
+        }
 
 		Radio.Send( (uint8_t *)txData, 
-            strlen(txData) > BUFFER_SIZE ? BUFFER_SIZE : (uint8_t)strlen(txData) );
+            length > BUFFER_SIZE ? BUFFER_SIZE : (uint8_t)length );
+        
+        Serial.printf("[LoRa] Da gui %d byte cuoi cung.\r\n", length);
+
+        Serial.println("[LoRa] Noi dung duoc in ra theo hexa: ");
+
+        for (int i = 0; i < length; i++) {
+            Serial.printf("%02X ", static_cast<uint8_t>(txData[i]));
+
+            if ((i + 1) % 16 == 0) {
+                Serial.println();
+            }
+        }
+
+        Serial.println();
         
         lora_idle = false;
 	}

@@ -13,10 +13,10 @@ String receiveRtcmFromGnss() {
     #endif
     String rtcmData = rtcmIn.readString();
     if (!rtcmData.isEmpty()) {
-        rtcmIn.println("Da nhan du lieu RTCM tu mach RTK:");
-        rtcmIn.println("[RTCM over LoRA]" + rtcmData);
+        rtcmIn.println("[UM980] Da nhan du lieu RTCM tu mach RTK:");
+        rtcmIn.println("[UM980] " + rtcmData);
     } else {
-        rtcmIn.println("[RTCM over LoRA] Khong co du lieu RTCM hop le.");
+        rtcmIn.println("[UM980] Khong co du lieu RTCM hop le.");
     }
     rtcmIn.println();
     return rtcmData;
