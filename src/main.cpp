@@ -16,16 +16,20 @@ SemaphoreHandle_t nmeaBufferMutex = nullptr;
 
 /* ===================== NGUYÊN MẪU HÀM ======================== */
 
-void taskRtcm(void* parameter);
-void gnssParseTask(void* parameter);
-void gnssPublishTask(void* parameter);
-void healthCheckTask(void* parameter);
+__attribute__((noreturn)) void taskRtcm(void* parameter);
+__attribute__((noreturn))void gnssParseTask(void* parameter);
+__attribute__((noreturn)) void gnssPublishTask(void* parameter);
+__attribute__((noreturn)) void healthCheckTask(void* parameter);
 
 /* ==================SETUP VÀ LOOP======================== */
 
 void setup()
 {
     Serial.begin(115200);
+    unsigned long serialWaitStart = millis();
+    while (!Serial && (millis() - serialWaitStart) < 5000) {
+        delay(10);
+    }
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, HIGH);
 
@@ -123,7 +127,7 @@ void setup()
 
 /* ================= TRIỂN KHAI HÀM TASK ====================== */
 
-void taskRtcm(void* parameter) {
+__attribute__((noreturn))void taskRtcm(void* parameter) {
     // không sử dụng tài nguyên chung, không cần mutex
     while (true) {
         #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
@@ -139,7 +143,7 @@ void taskRtcm(void* parameter) {
     }
 }
 
-void gnssParseTask(void* parameter) {
+__attribute__((noreturn)) void gnssParseTask(void* parameter) {
     // sử dụng nmeaBuffer làm tài nguyên chung với publishTask, cần mutex để tránh xung đột
     while (true) {
         if (xSemaphoreTake(nmeaBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS))) {
@@ -160,7 +164,7 @@ void gnssParseTask(void* parameter) {
     }
 }
 
-void gnssPublishTask(void* parameter) {
+__attribute__((noreturn))void gnssPublishTask(void* parameter) {
     String localBuf = "";
     String topic = "";
     // sử dụng nmeaBuffer làm tài nguyên chung với gnssParseTask
@@ -201,7 +205,7 @@ void gnssPublishTask(void* parameter) {
     }
 }
 
-void healthCheckTask(void* parameter) {
+__attribute__((noreturn)) void healthCheckTask(void* parameter) {
     String healthPayload = "";
     while (true) {
         healthPayload = formDeviceHealthString();
