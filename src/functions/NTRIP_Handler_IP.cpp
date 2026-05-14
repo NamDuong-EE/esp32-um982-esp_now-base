@@ -1,4 +1,4 @@
-#if NMEA_COMMUNICATION_PROTOCOL == TCP_IP || defined(UNIT_TEST)
+#if NMEA_COMMUNICATION_PROTOCOL == 0 || defined(UNIT_TEST)
 #define NTRIP_HANDLER_IP_CODE
 
 #include "functions/NTRIP_Handler_IP.h"

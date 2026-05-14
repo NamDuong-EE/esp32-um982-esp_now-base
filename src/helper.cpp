@@ -1,41 +1,6 @@
 #include "helper.h"
 
-extern String latestGGA;
-
-gga_data_t ggaData;
-gga_data_t targetGgaData;
-
-
-int publishGGA(String &rtcmBuffer)
-{
-    rtcmBuffer.trim();
-
-    // Bắt dòng tọa độ
-    if (rtcmBuffer.startsWith("$GNGGA") || rtcmBuffer.startsWith("$GPGGA") || rtcmBuffer.startsWith("$KSXT"))
-    {
-        // Cập nhật tọa độ mới nhất để NTRIP dùng xác thực (Mode 3)
-        latestGGA = rtcmBuffer;
-
-        // Đẩy lên MQTT
-        String jsonPayload = "";
-        if (rtcmBuffer.startsWith("$GPGGA"))
-        {
-            publishRaw(rtcmBuffer, true);
-        }
-        rtcmBuffer = "";
-        return 0;
-    }
-    // Bắt dòng phản hồi lệnh
-    else if (rtcmBuffer.startsWith("#"))
-    {
-        Serial.print("[UM980 RESPONSE] ");
-        Serial.println(rtcmBuffer);
-        rtcmBuffer = "";
-        return -1;
-    }
-    rtcmBuffer = "";
-    return -2;
-}
+extern String latestRtcm;
 
 String formDeviceHealthString()
 {
@@ -59,7 +24,7 @@ String formDeviceHealthString()
     // Nếu dùng LoRa thì không có NTRIP qua TCP/IP, sẽ có cách khác để kiểm tra. Hiện chưa có mã nguồn cho LoRa nên tạm thời để false.
     bool ntripOk = false;
 #endif
-    bool gnssOk = (latestGGA.length() > 10); // Nếu có chuỗi NMEA hợp lệ
+    bool gnssOk = (latestRtcm.length() > 10); // Nếu có chuỗi NMEA hợp lệ
 
     // 2. Đóng gói thành JSON
     std::string healthPayload = "{";
@@ -71,10 +36,6 @@ String formDeviceHealthString()
     healthPayload += ",\"ntrip_ok\":" + std::string(ntripOk ? "true" : "false");
     healthPayload += ",\"gnss_data_ok\":" + std::string(gnssOk ? "true" : "false");
     healthPayload += "}";
-    /*Xóa tọa độ sau khi đã dùng để đánh giá sức khoẻ, nếu còn giữ, 
-    trong trường hợp không có dữ liệu mới, sẽ luôn báo GNSS OK dù 
-    thực tế đã mất tín hiệu. Việc này giúp phản ánh tình trạng thực tế hơn.*/ 
-    latestGGA = "";
     // 3. Trả về payload để có thể log hoặc dùng cho mục đích khác nếu cần
     return String(healthPayload.c_str());
 }

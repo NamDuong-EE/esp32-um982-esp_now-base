@@ -22,16 +22,13 @@ extern TinyGsm modem;
 #include "functions/RTCM_Receiver.h"
 #endif
 
-#include "functions/NMEA_Parser.h"
-#include "DataStructs.h"
+// #include "DataStructs.h"
 
 // ================= ĐỊNH NGHĨA CÁC BIẾN TOÀN CỤC =================
 extern String latestGGA;
-extern String targetGGA;
 extern bool mqttHealthMode;
 
 // ================= ĐỊNH NGHĨA CÁC HÀM =================
 String formDeviceHealthString();
-int publishGGA(String& rtcmBuffer);
 
 #endif

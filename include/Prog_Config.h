@@ -6,8 +6,8 @@
 
 // ================= CẤU HÌNH CHÂN CẮM VÀ TỐC ĐỘ SERIAL =================
 inline constexpr int LED_PIN = 35; // Chân LED tích hợp trên Heltec V4
-inline constexpr int RX_GNSS = 44; // Nối TXD (Hàng dưới) của UM980
-inline constexpr int TX_GNSS = 43; // Nối RXD (Hàng dưới) của UM980
+inline constexpr int RX_GNSS = 41; // Nối TXD (Hàng dưới) của UM980
+inline constexpr int TX_GNSS = 42; // Nối RXD (Hàng dưới) của UM980
 inline constexpr int GNSS_BAUD = 115200;
 
 // ================= CẤU HÌNH CÁC TASK =================
@@ -29,6 +29,24 @@ inline constexpr char APN[] = "v-internet"; // Thay bằng APN của nhà mạng
 inline constexpr char GPRS_USER[] = "";     // Thường để trống
 inline constexpr char GPRS_PASS[] = "";
 #endif
+
+// ================ CẤU HÌNH LORA =================
+inline constexpr char RF_FREQUENCY = 915000000; // Hz
+inline constexpr char TX_OUTPUT_POWER = 5;        // dBm
+inline constexpr char LORA_BANDWIDTH = 0;         // [0: 125 kHz,
+                                                              //  1: 250 kHz,
+                                                              //  2: 500 kHz,
+                                                              //  3: Reserved]
+inline constexpr char LORA_SPREADING_FACTOR = 7;         // [SF7..SF12]
+inline constexpr char LORA_CODINGRATE = 1;         // [1: 4/5,
+                                                              //  2: 4/6,
+                                                              //  3: 4/7,
+                                                              //  4: 4/8]
+inline constexpr char LORA_PREAMBLE_LENGTH = 8;         // Same for Tx and Rx
+inline constexpr char LORA_SYMBOL_TIMEOUT = 0;         // Symbols
+inline constexpr char LORA_FIX_LENGTH_PAYLOAD_ON = false;
+inline constexpr char LORA_IQ_INVERSION_ON = false;
+inline constexpr char LORA_TX_TIMEOUT = 3000;         // ms
 
 // ================= CẤU HÌNH NTRIP =================
 inline constexpr int NTRIP_MODE = 3; // 1: Chỉ gửi GGA khi có yêu cầu; 2: Gửi GGA mỗi khi có thay đổi; 3: Gửi GGA đều đặn mỗi 10s
@@ -54,8 +72,7 @@ inline constexpr char MQTT_PASS[] = "MqttPassword123$%^";
 inline constexpr char TOPIC_PUB_DATA_GGA[] = "tdm2402/um980/data/gga";
 inline constexpr char TOPIC_PUB_DATA_KSXT[] = "tdm2402/um980/data/ksxt";
 inline constexpr char TOPIC_SUB_CMD[] = "tdm2402/um980/cmd";
-inline constexpr char TOPIC_PUB_RAW_GGA[] = "tdm2402/um980/raw/gga";
-inline constexpr char TOPIC_PUB_RAW_KSXT[] = "tdm2402/um980/raw/ksxt";
+inline constexpr char TOPIC_PUB_RAW_RTCM[] = "tdm2402/um980_base/raw/last_rtcm";
 inline constexpr char TOPIC_PUB_HEALTH[] = "tdm2402/um980/health";
 
 // ================= CẤU HÌNH KIỂM TRA SỨC KHOẺ =================
