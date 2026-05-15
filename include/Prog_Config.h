@@ -31,6 +31,7 @@ inline constexpr char GPRS_PASS[] = "";
 #endif
 
 // ================ CẤU HÌNH LORA =================
+#if NMEA_COMMUNICATION_PROTOCOL == LORA_SERIAL
 inline constexpr int RF_FREQUENCY = 915000000; // Hz
 inline constexpr int TX_OUTPUT_POWER = 5;        // dBm
 inline constexpr int LORA_BANDWIDTH = 0;         // [0: 125 kHz,
@@ -47,6 +48,7 @@ inline constexpr int LORA_SYMBOL_TIMEOUT = 0;         // Symbols
 inline constexpr bool LORA_FIX_LENGTH_PAYLOAD_ON = false;
 inline constexpr bool LORA_IQ_INVERSION_ON = false;
 inline constexpr int LORA_TX_TIMEOUT = 3000;         // ms
+#endif
 
 // ================= CẤU HÌNH NTRIP =================
 inline constexpr int NTRIP_MODE = 3; // 1: Chỉ gửi GGA khi có yêu cầu; 2: Gửi GGA mỗi khi có thay đổi; 3: Gửi GGA đều đặn mỗi 10s

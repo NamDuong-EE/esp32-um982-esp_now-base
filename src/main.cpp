@@ -230,6 +230,7 @@ void loop() {
         digitalWrite(LED_PIN, HIGH);
         Serial.println("[LOOP] MQTT mat ket noi, dang thu ket noi lai...");
         connectMQTT();
+        digitalWrite(LED_PIN, LOW);
     }
     vTaskDelay(pdMS_TO_TICKS(1000)); // loop trống, tất cả logic đã được xử lý trong các task
 }

@@ -1,10 +1,11 @@
 #if NMEA_COMMUNICATION_PROTOCOL == 1
 #include "hardware/Lora_handler.h"
-#include "functions/RTCM_Receiver.h"
 
 static bool lora_idle;
 
 static double txNumber;
+
+static RadioEvents_t RadioEvents;
 
 int loraSetup( void ) {
     Mcu.begin(HELTEC_BOARD,SLOW_CLK_TPYE);
