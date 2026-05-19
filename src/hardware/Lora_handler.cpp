@@ -2,9 +2,7 @@
 #include "hardware/Lora_handler.h"
 
 static bool lora_idle;
-
 static double txNumber;
-
 static RadioEvents_t RadioEvents;
 
 int loraSetup( void ) {
@@ -51,6 +49,7 @@ int loraSend(char* txData, int length)
         Serial.println("[LoRa] Do dai du lieu vuot qua BUFFER_SIZE, se phan doan thanh nhieu goi!");
     }
 
+    lora_idle = false;
     while (length > BUFFER_SIZE - 12) {
         Radio.Send( (uint8_t *)txData, BUFFER_SIZE - 12 );
         txData += BUFFER_SIZE - 12;
@@ -68,6 +67,7 @@ int loraSend(char* txData, int length)
         }
 
         Serial.println();
+        delay(200);
     }
 
     Radio.Send( (uint8_t *)txData, 
@@ -86,10 +86,8 @@ int loraSend(char* txData, int length)
     }
 
     Serial.println();
-    
-    lora_idle = false;
-    // end ekse
-    
+    // end else
+
     endFunction:
     Radio.IrqProcess( );
     return 0;
