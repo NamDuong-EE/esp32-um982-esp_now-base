@@ -4,12 +4,7 @@
 // ============ GẮN CÁC THƯ VIỆN CẦN THIẾT ==============
 
 #include <Arduino.h>
-#ifdef NATIVE_BUILD
-#include "mockPubSubClient.h"
-extern String command;
-#else
 #include <PubSubClient.h>
-#endif
 #include "Top_Lvl_Config.h"
 
 extern PubSubClient mqtt;

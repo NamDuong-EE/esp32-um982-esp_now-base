@@ -20,11 +20,7 @@ bool setupWiFi() {
       return false;
     }
   }
-  #ifdef NATIVE_BUILD
-  Serial.println("\n[WIFI] Ket noi THANH CONG! IP: " + WiFi.ipToString(WiFi.localIP()));
-  #else
   Serial.println("\n[WIFI] Ket noi THANH CONG! IP: " + WiFi.localIP().toString());
-  #endif
   return true;
 }
 
