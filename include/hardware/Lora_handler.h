@@ -9,6 +9,6 @@ inline constexpr uint8_t BUFFER_SIZE = 255; // Define the payload size here
 
 void OnTxDone( void );
 void OnTxTimeout( void );
-void loraSend(char* txData, int length);
+int loraSend(char* txData, int length);
 int loraSetup();
 #endif
