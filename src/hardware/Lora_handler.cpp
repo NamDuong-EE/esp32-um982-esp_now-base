@@ -8,8 +8,6 @@ static double txNumber;
 static RadioEvents_t RadioEvents;
 
 int loraSetup( void ) {
-    Mcu.begin(HELTEC_BOARD,SLOW_CLK_TPYE);
-	
     txNumber=0;
 
     RadioEvents.TxDone = OnTxDone;
@@ -45,19 +43,19 @@ void loraSend(char* txData, int length)
 
         Serial.println();
 
-        if (length > BUFFER_SIZE) {
+        if (length > BUFFER_SIZE - 12) {
             Serial.println("[LoRa] Do dai du lieu vuot qua BUFFER_SIZE, se phan doan thanh nhieu goi!");
         }
 
-        while (length > BUFFER_SIZE) {
-            Radio.Send( (uint8_t *)txData, BUFFER_SIZE );
-            txData += BUFFER_SIZE;
-            length -= BUFFER_SIZE;
-            Serial.printf("[LoRa] Da gui %d byte, con lai: %d\r\n", BUFFER_SIZE, length);
+        while (length > BUFFER_SIZE - 12) {
+            Radio.Send( (uint8_t *)txData, BUFFER_SIZE - 12 );
+            txData += BUFFER_SIZE - 12;
+            length -= BUFFER_SIZE - 12;
+            Serial.printf("[LoRa] Da gui %d byte, con lai: %d\r\n", BUFFER_SIZE - 12, length);
 
             Serial.println("[LoRa] Noi dung doan duoc in ra theo hexa: ");
 
-            for (int i = 0; i < length; i++) {
+            for (int i = 0; i < BUFFER_SIZE - 12; i++) {
                 Serial.printf("%02X ", static_cast<uint8_t>(txData[i]));
 
                 if ((i + 1) % 16 == 0) {
@@ -69,7 +67,7 @@ void loraSend(char* txData, int length)
         }
 
 		Radio.Send( (uint8_t *)txData, 
-            length > BUFFER_SIZE ? BUFFER_SIZE : (uint8_t)length );
+            length > BUFFER_SIZE - 12 ? BUFFER_SIZE - 12 : (uint8_t)length );
         
         Serial.printf("[LoRa] Da gui %d byte cuoi cung.\r\n", length);
 

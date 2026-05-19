@@ -22,6 +22,7 @@ __attribute__((noreturn)) void healthCheckTask(void* parameter);
 void setup()
 {
     Serial.begin(115200);
+    Mcu.begin(HELTEC_BOARD,SLOW_CLK_TPYE);
     unsigned long serialWaitStart = millis();
     while (!Serial && (millis() - serialWaitStart) < 5000) {
         delay(10);
