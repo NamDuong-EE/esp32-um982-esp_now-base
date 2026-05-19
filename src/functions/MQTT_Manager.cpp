@@ -3,10 +3,6 @@
 #include "Prog_Config.h"
 
 // ================= ĐỊNH NGHĨA CÁC ĐỐI TƯỢNG CẦN CHO KẾT NỐI =================
-#ifdef NATIVE_BUILD
-PubSubClient mqtt;
-String command;
-#else
 #if CONNECT_USING_WIFI
 #include "hardware/Wifi_handler.h"
 static WiFiClient espClient;
@@ -17,7 +13,6 @@ extern TinyGsm modem;
 static TinyGsmClient espClient(modem);
 #endif
 PubSubClient mqtt(espClient);
-#endif
 
 // ================= ĐỊNH NGHĨA HÀM =================
 
@@ -28,13 +23,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("\n[MQTT DOWNLINK] Lenh: ");
   Serial.println(cmd);
   
-  #ifdef NATIVE_BUILD
-  command = cmd; // Lưu lệnh vào biến toàn cục để test
-  #else
   // Đẩy lệnh xuống UM980 qua Serial1
   Serial1.print(cmd);
   Serial1.print("\r\n");
-  #endif
 }
 
 int setupMQTT() {

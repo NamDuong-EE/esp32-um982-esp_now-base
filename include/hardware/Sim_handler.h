@@ -16,11 +16,7 @@
 
 // #define MODEM_RESET_PIN 4
 
-#ifdef NATIVE_BUILD
-#include <Mocks/TinyGsmClient.h>
-#else
 #include <TinyGsmClient.h>
-#endif
 #include "Top_Lvl_Config.h"
 
 #ifdef DUMP_AT_COMMANDS

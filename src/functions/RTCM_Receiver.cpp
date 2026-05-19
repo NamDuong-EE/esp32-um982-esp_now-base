@@ -1,23 +1,14 @@
 #include "functions/RTCM_Receiver.h"
 #include "HardwareSerial.h"
 
-#ifdef NATIVE_BUILD
-#include <ArduinoFake.h>
-#endif
-
 String receiveRtcmFromGnss() {
-    #ifdef NATIVE_BUILD
-    auto& rtcmIn = Serial;
-    #else
-    auto& rtcmIn = Serial1;
-    #endif
-    String rtcmData = rtcmIn.readString();
+    String rtcmData = Serial1.readString();
     if (!rtcmData.isEmpty()) {
-        rtcmIn.println("[UM980] Da nhan du lieu RTCM tu mach RTK:");
-        rtcmIn.println("[UM980] " + rtcmData);
+        Serial1.println("[UM980] Da nhan du lieu RTCM tu mach RTK:");
+        Serial1.println("[UM980] " + rtcmData);
     } else {
-        rtcmIn.println("[UM980] Khong co du lieu RTCM hop le.");
+        Serial1.println("[UM980] Khong co du lieu RTCM hop le.");
     }
-    rtcmIn.println();
+    Serial1.println();
     return rtcmData;
 }
