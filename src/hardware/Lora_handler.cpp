@@ -49,12 +49,14 @@ int loraSend(char* txData, int length)
         Serial.println("[LoRa] Do dai du lieu vuot qua BUFFER_SIZE, se phan doan thanh nhieu goi!");
     }
 
-    lora_idle = false;
     while (length > BUFFER_SIZE - 12) {
+        lora_idle = false;
         Radio.Send( (uint8_t *)txData, BUFFER_SIZE - 12 );
         txData += BUFFER_SIZE - 12;
         length -= BUFFER_SIZE - 12;
         Serial.printf("[LoRa] Da gui %d byte, con lai: %d\r\n", BUFFER_SIZE - 12, length);
+
+        Serial.printf("[LoRa] Noi dung da gui duoc in ra (dang text): %.*s\r\n", BUFFER_SIZE - 12, txData - (BUFFER_SIZE - 12));
 
         Serial.println("[LoRa] Noi dung doan duoc in ra theo hexa: ");
 
@@ -70,10 +72,13 @@ int loraSend(char* txData, int length)
         delay(200);
     }
 
+    lora_idle = false;
     Radio.Send( (uint8_t *)txData, 
         length > BUFFER_SIZE - 12 ? BUFFER_SIZE - 12 : (uint8_t)length );
     
     Serial.printf("[LoRa] Da gui %d byte cuoi cung.\r\n", length);
+
+    Serial.printf("[LoRa] Noi dung da gui duoc in ra (dang text): %.*s\r\n", length, txData);
 
     Serial.println("[LoRa] Noi dung duoc in ra theo hexa: ");
 
