@@ -69,10 +69,12 @@ int loraSend(char* txData, int length)
         }
 
         Serial.println();
-        delay(200);
+        Radio.IrqProcess( );
+        while (!lora_idle) {}
     }
 
     lora_idle = false;
+
     Radio.Send( (uint8_t *)txData, 
         length > BUFFER_SIZE - 12 ? BUFFER_SIZE - 12 : (uint8_t)length );
     
@@ -102,6 +104,9 @@ void OnTxDone( void )
 {
 	Serial.println("[LoRa] Hoan thanh Tx......");
 	lora_idle = true;
+    digitalWrite(LED_PIN, HIGH);
+    delay(100);
+    digitalWrite(LED_PIN, LOW);
 }
 
 void OnTxTimeout( void )
@@ -109,5 +114,12 @@ void OnTxTimeout( void )
     Radio.Sleep( );
     Serial.println("[LoRa] Het thoi gian cho TX......");
     lora_idle = true;
+    digitalWrite(LED_PIN, HIGH);
+    delay(50);
+    digitalWrite(LED_PIN, LOW);
+    delay(50);
+    digitalWrite(LED_PIN, HIGH);
+    delay(50);
+    digitalWrite(LED_PIN, LOW);
 }
 #endif
