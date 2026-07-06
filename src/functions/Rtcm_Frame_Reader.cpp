@@ -25,16 +25,17 @@ void resetState()
 
 void dumpRawUartByte(uint8_t byte)
 {
+    const uint32_t byteOffset = rawByteOffset++;
+
     if (!DEBUG_GNSS_UART_RAW_DUMP) {
         return;
     }
 
     if (rawLineByteCount == 0) {
-        Serial.printf("[BASE][GNSS][UART_RAW] %08lu: ", static_cast<unsigned long>(rawByteOffset));
+        Serial.printf("[BASE][GNSS][UART_RAW] %08lu: ", static_cast<unsigned long>(byteOffset));
     }
 
     Serial.printf("%02X", byte);
-    ++rawByteOffset;
     ++rawLineByteCount;
 
     if (rawLineByteCount >= DEBUG_RTCM_HEX_BYTES_PER_LINE) {

@@ -83,27 +83,63 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
 
 [[noreturn]] void healthLogTask(void*)
 {
+    uint32_t previousLogAt = millis();
+    uint32_t previousRawBytes = getRtcmRawByteCount();
+    uint32_t previousRtcmValid = rtcmValidFrames;
+    uint32_t previousFramesSent = getBaseEspnowStats().framesSent;
+    uint32_t previousFramesDropped = getBaseEspnowStats().framesDropped;
+
     while (true) {
+        vTaskDelay(pdMS_TO_TICKS(HEALTH_INTERVAL));
+
+        const uint32_t now = millis();
+        const uint32_t periodMs = now - previousLogAt;
         const BaseEspnowStats& espnow = getBaseEspnowStats();
+        const uint32_t rawBytes = getRtcmRawByteCount();
+        const uint32_t validFrames = rtcmValidFrames;
+        const uint32_t framesSent = espnow.framesSent;
+        const uint32_t framesDropped = espnow.framesDropped;
+
+        const uint32_t deltaRawBytes = rawBytes - previousRawBytes;
+        const uint32_t deltaRtcmValid = validFrames - previousRtcmValid;
+        const uint32_t deltaFramesSent = framesSent - previousFramesSent;
+        const uint32_t deltaFramesDropped = framesDropped - previousFramesDropped;
+        const uint32_t deltaDeliveryTotal = deltaFramesSent + deltaFramesDropped;
+        const float seconds = periodMs > 0 ? static_cast<float>(periodMs) / 1000.0F : 1.0F;
+        const float deliveryPercent = deltaDeliveryTotal > 0
+                                          ? (100.0F * static_cast<float>(deltaFramesSent) /
+                                             static_cast<float>(deltaDeliveryTotal))
+                                          : 0.0F;
+
         flushRtcmDebugLine();
         Serial.printf(
-            "[BASE][HEALTH] uart_available=%d uart_raw_bytes=%lu rtcm_valid=%lu crc_error=%lu "
+            "[BASE][HEALTH] period_ms=%lu uart_Bps=%.1f rtcm_fps=%.2f send_fps=%.2f "
+            "delivery=%.1f%% uart_available=%d uart_raw_bytes=%lu rtcm_valid=%lu crc_error=%lu "
             "too_large=%lu frames_sent=%lu frames_dropped=%lu fragments_sent=%lu send_fail=%lu "
             "send_timeout=%lu task_send_ok=%lu task_send_fail=%lu\n",
+            static_cast<unsigned long>(periodMs),
+            static_cast<double>(deltaRawBytes) / seconds,
+            static_cast<double>(deltaRtcmValid) / seconds,
+            static_cast<double>(deltaFramesSent) / seconds,
+            static_cast<double>(deliveryPercent),
             Serial1.available(),
-            static_cast<unsigned long>(getRtcmRawByteCount()),
-            static_cast<unsigned long>(rtcmValidFrames),
+            static_cast<unsigned long>(rawBytes),
+            static_cast<unsigned long>(validFrames),
             static_cast<unsigned long>(rtcmCrcErrors),
             static_cast<unsigned long>(rtcmTooLarge),
-            static_cast<unsigned long>(espnow.framesSent),
-            static_cast<unsigned long>(espnow.framesDropped),
+            static_cast<unsigned long>(framesSent),
+            static_cast<unsigned long>(framesDropped),
             static_cast<unsigned long>(espnow.fragmentsSent),
             static_cast<unsigned long>(espnow.sendFailures),
             static_cast<unsigned long>(espnow.sendTimeouts),
             static_cast<unsigned long>(rtcmSendOk),
             static_cast<unsigned long>(rtcmSendFail));
 
-        vTaskDelay(pdMS_TO_TICKS(HEALTH_INTERVAL));
+        previousLogAt = now;
+        previousRawBytes = rawBytes;
+        previousRtcmValid = validFrames;
+        previousFramesSent = framesSent;
+        previousFramesDropped = framesDropped;
     }
 }
 }

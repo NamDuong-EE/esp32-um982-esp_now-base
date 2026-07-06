@@ -1,6 +1,6 @@
 # ESP32 GNSS Base ESP-NOW
 
-Firmware Base dùng ESP32 kết nối với UM980/UM982 qua UART, đọc dữ liệu RTCM3 do module GNSS Base xuất ra, chia gói và gửi sang Rover bằng ESP-NOW Long Range. Repo này sẽ được chuyển từ kiến trúc cũ dùng LoRa/NTRIP/MQTT sang kiến trúc Base ESP-NOW chuyên dụng.
+Repo này tập trung xây dựng Firmware cho Base dùng mạch ESP32 kết nối với UM980/UM982 qua UART, đọc dữ liệu RTCM3 do module GNSS Base xuất ra, chia gói và gửi sang Rover bằng ESP-NOW Long Range.
 
 ```text
 UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ──> ESP32 Rover ── UART ──> UM980/982 Rover
@@ -23,7 +23,7 @@ UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ─
 
 ### Vai trò của Base
 
-Base không nhận correction từ NTRIP caster nữa. Base là trạm phát correction cục bộ:
+trong phiên bản thử nghiệm hiện tại base sẽ không nhật correction từ NTRIP caster. Hiện tại đang tập trung phát triển và test khả năng phát và nhận gói tin giữ base và rover:
 
 1. UM980/UM982 được cấu hình ở chế độ Base.
 2. UM980/UM982 xuất RTCM ra UART.
@@ -44,12 +44,6 @@ Base không nhận correction từ NTRIP caster nữa. Base là trạm phát cor
 - Giai đoạn đầu dùng MAC cấu hình tĩnh, chưa triển khai broadcast discovery/pairing động.
 - Có thể bật mã hóa PMK/LMK sau khi Base/Rover đã chạy ổn định.
 
-### Vì sao không dùng LoRa nữa
-
-- RTCM là luồng nhị phân thời gian thực, thường có burst nhiều frame liên tiếp.
-- LoRa băng thông thấp, thời gian truyền dài, dễ làm correction bị trễ.
-- ESP-NOW LR trên ESP32 cho throughput cao hơn và phù hợp hơn cho link Base ↔ Rover khoảng cách gần/trung bình ngoài thực địa.
-- Dùng ESP32U giúp tận dụng anten ngoài cho Wi-Fi/ESP-NOW.
 
 ## Cấu hình cần có
 
@@ -73,7 +67,7 @@ inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
 inline constexpr uint8_t ESPNOW_PMK[16] = {0};
 inline constexpr uint8_t ESPNOW_LMK[16] = {0};
 
-inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = true;
+inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = false;
 inline constexpr bool DEBUG_RTCM_HEX_DUMP = true;
 inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
 ```
@@ -138,105 +132,6 @@ Không gửi đủ 250 byte nếu fragment cuối không dùng hết payload.
 7. Chỉ gửi fragment kế tiếp sau khi send callback của fragment trước trả về.
 8. Nếu send callback lỗi, retry ngắn; nếu vẫn lỗi thì bỏ frame hiện tại.
 9. Tăng `frameSequence` sau mỗi frame, kể cả frame bị bỏ.
-
-## Những điểm cần sửa trong code hiện tại
-
-### 1. Thay `RTCM_Receiver`
-
-File hiện tại:
-
-```text
-src/functions/RTCM_Receiver.cpp
-```
-
-đang dùng `String` và `Serial1.readString()`. Cách này không phù hợp với RTCM nhị phân. Ngoài ra file này còn ghi debug bằng `Serial1.println()`, tức ghi ngược vào UART của UM980/982, cần bỏ hoàn toàn.
-
-Thay bằng module mới:
-
-```text
-include/functions/Rtcm_Frame_Reader.h
-src/functions/Rtcm_Frame_Reader.cpp
-```
-
-Trách nhiệm:
-
-- đọc từng byte từ `Serial1`;
-- tìm preamble `0xD3`;
-- đọc length;
-- gom đủ frame;
-- kiểm tra CRC24Q;
-- trả về buffer `uint8_t frame[1029]` và `frameLength`.
-
-### 2. Thay LoRa sender bằng ESP-NOW sender
-
-Loại bỏ luồng:
-
-```text
-src/hardware/Lora_handler.cpp
-include/hardware/Lora_handler.h
-taskLora()
-```
-
-Thêm module:
-
-```text
-include/hardware/BaseEspnow_sender.h
-src/hardware/BaseEspnow_sender.cpp
-```
-
-Trách nhiệm:
-
-- cấu hình `WiFi.mode(WIFI_STA)`;
-- tắt sleep;
-- đặt protocol `WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR`;
-- đặt channel cố định;
-- `esp_now_init()`;
-- add peer là `ESPNOW_ROVER_MAC`;
-- đặt LR PHY rate 250 Kbps;
-- chia RTCM frame thành fragment và gửi bằng `esp_now_send()`;
-- ghi counter: frame gửi thành công, fragment lỗi, send timeout.
-
-### 3. Rút gọn `main.cpp`
-
-Luồng chính mới:
-
-```text
-setup()
-  Serial.begin()
-  Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS)
-  setupEspNowBase()
-  tạo task đọc/gửi RTCM
-  tạo task health log
-
-taskRtcm()
-  nếu đọc được RTCM frame hợp lệ
-    baseEspNowSendRtcmFrame(frame, length)
-
-loop()
-  delay ngắn hoặc xử lý retry ESP-NOW nếu cần
-```
-
-Không cần `setupMQTT()`, `connectMQTT()`, `setupNTRIP()` hoặc task LoRa trong field mode.
-
-### 4. Dọn `platformio.ini`
-
-Repo hiện có nhiều environment cho Wi-Fi/4G/Heltec/LoRa. Kiến trúc mới nên còn một environment chính:
-
-```ini
-[platformio]
-default_envs = esp32u_base_espnow
-
-[env:esp32u_base_espnow]
-platform = espressif32
-board = esp32dev
-framework = arduino
-monitor_speed = 115200
-build_flags =
-    -std=gnu++17
-    -DCONNECT_USING_WIFI=1
-    -DCONNECT_USING_4G=0
-    -DFIRMWARE_ROLE_BASE=1
-```
 
 ## Cách nạp firmware vào ESP32 Base
 
@@ -339,14 +234,13 @@ Sau khi monitor mở, bấm `EN/RESET` trên ESP32 Base. Log mong đợi:
 Khi UM980/UM982 Base bắt đầu xuất RTCM hợp lệ qua UART, log sẽ có:
 
 ```text
-[BASE][GNSS][UART_RAW] 00000000: D3 ...
 [BASE][GNSS] RTCM frame valid, length=...
 [BASE][GNSS][RTCM_HEX] valid length=...
 [BASE][GNSS][RTCM_HEX] 0000: D3 ...
-[BASE][HEALTH] uart_available=... uart_raw_bytes=... rtcm_valid=..., frames_sent=..., fragments_sent=..., send_fail=...
+[BASE][HEALTH] period_ms=30000 uart_Bps=... rtcm_fps=... send_fps=... delivery=...% ...
 ```
 
-`DEBUG_GNSS_UART_RAW_DUMP = true` sẽ in mọi byte thô ESP32 đọc được từ `Serial1` trước khi parser kiểm tra RTCM. Nếu không thấy dòng `[UART_RAW]` thì ESP32 chưa nhận byte nào từ UM980/UM982: cần kiểm tra dây TX/RX, GND, baudrate và cổng UART output trên module GNSS.
+Đổi `DEBUG_GNSS_UART_RAW_DUMP = true` khi cần in mọi byte thô ESP32 đọc được từ `Serial1`. Chế độ này mặc định tắt vì lượng log HEX lớn có thể làm chậm luồng đọc/gửi RTCM; dùng `uart_raw_bytes` và `uart_Bps` trong health log để kiểm tra UART khi raw dump đang tắt.
 
 Nếu health log vẫn không có trường `uart_available` và `uart_raw_bytes`, ESP32 đang chạy firmware cũ và cần nạp lại đúng binary mới.
 
@@ -466,3 +360,6 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm cấu hình `DEBUG_GNSS_UART_RAW_DUMP` để in mọi byte thô đọc được từ UART GNSS trước parser RTCM, giúp phân biệt lỗi không có tín hiệu UART với lỗi chưa ghép được frame RTCM hợp lệ.
 - Đã bổ sung `uart_available` và `uart_raw_bytes` vào health log để xác nhận ESP32 có nhận byte UART từ UM980/UM982 hay chưa, kể cả khi chưa có frame RTCM hợp lệ.
 - Đã cập nhật nhãn cấu hình/log/README theo phần cứng dự kiến chưa hàn: UM980/UM982 dùng UART2 `TX2/RX2` nối sang ESP32 GPIO16/GPIO17.
+- Đã bổ sung đo tốc độ thực theo mỗi chu kỳ health 30 giây: `uart_Bps` (byte UART/giây), `rtcm_fps` (frame RTCM hợp lệ/giây), `send_fps` (frame gửi thành công/giây) và `delivery` (tỷ lệ frame gửi thành công trong chu kỳ).
+- Đã tắt `DEBUG_GNSS_UART_RAW_DUMP` sau khi xác nhận UART2 nhận đúng dữ liệu để tránh in HEX từng byte làm nghẽn Serial; vẫn giữ `DEBUG_RTCM_HEX_DUMP` để xem đầy đủ từng frame RTCM. Bộ đếm `uart_raw_bytes` vẫn hoạt động khi raw dump tắt.
+- Đã build thành công firmware sau khi thêm thống kê tốc độ. PlatformIO báo RAM 44,600/327,680 bytes (13.6%), Flash 736,965/1,310,720 bytes (56.2%).
