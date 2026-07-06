@@ -2,8 +2,12 @@
 
 // ================= ĐỊNH NGHĨA CÁC BIẾN TOÀN CỤC =================
 extern PubSubClient mqtt;
+extern TinyGsmClient ntripClient;
+extern TinyGsm modem;
 
-String rtcmBuffer = "";
+#if RTCM_COMMUNICATION_PROTOCOL==LORA_SERIAL
+String rtcmBuffer = ""; // Bộ đệm đọc RTCM từ UM980 để gửi lên Caster qua NTRIP
+#endif
 unsigned long lastHealthCheck = 0;
 String latestRtcm = "";
 
@@ -12,9 +16,12 @@ SemaphoreHandle_t rtcmBufferMutex = nullptr;
 
 /* ===================== NGUYÊN MẪU HÀM ======================== */
 
+#if RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
 __attribute__((noreturn)) void taskLora(void* parameter);
 __attribute__((noreturn)) void taskRtcm(void* parameter);
-__attribute__((noreturn)) void gnssPublishTask(void* parameter);
+#else
+__attribute__((noreturn)) void taskNtrip(void* parameter);
+#endif
 __attribute__((noreturn)) void healthCheckTask(void* parameter);
 
 /* ==================SETUP VÀ LOOP======================== */
@@ -22,11 +29,10 @@ __attribute__((noreturn)) void healthCheckTask(void* parameter);
 void setup()
 {
     Serial.begin(115200);
+    #if BOARD_HELTEC
     Mcu.begin(HELTEC_BOARD,SLOW_CLK_TPYE);
-    unsigned long serialWaitStart = millis();
-    while (!Serial && (millis() - serialWaitStart) < 5000) {
-        delay(10);
-    }
+    #endif
+    delay(100);
 
     // Debug marker: confirm Serial is working immediately after begin()
     Serial.println("[DEBUG] Serial initialized");
@@ -38,12 +44,19 @@ void setup()
     Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS);
     bool networkConnected = false;
 
+    #ifndef NATIVE_BUILD
+    SerialAT.begin(115200, SERIAL_8N1, RX_TO_MODEM_TX, TX_TO_MODEM_RX);
+    delay(500);
+    #endif
+
+    #if RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
     int loraSetupResult = loraSetup();
     if (loraSetupResult != 0) {
         Serial.println("[SETUP][ERROR] Khoi dong LoRa that bai! Vui long kiem tra cau hinh va thu lai.");
     } else {
         Serial.println("[SETUP] Khoi dong LoRa thanh cong!");
     }
+    #endif
 
     while (!networkConnected) {
 #if CONNECT_USING_WIFI
@@ -61,8 +74,9 @@ void setup()
         if (networkConnected) {
             Serial.println("[SETUP] Ket noi mang thanh cong!");
             setupMQTT();
-            #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
+            #if RTCM_COMMUNICATION_PROTOCOL == TCP_IP
             setupNTRIP();
+            connectNTRIP();
             #endif
         } else {
             Serial.println("[ERROR] Khong the ket noi mang. Vui long kiem tra cau hinh va thu lai.");
@@ -72,7 +86,7 @@ void setup()
     Serial.println("[SETUP] Khoi dong cac task...");
 
     Serial.println("[Setup] Tao mutex de dong bo hoa tai nguyen chung");
-
+    
     rtcmBufferMutex = xSemaphoreCreateMutex();
     while (rtcmBufferMutex == nullptr) {
         Serial.println("[ERROR] Tao mutex rtcmDataMutex that bai! Dang thu lai...");
@@ -80,6 +94,7 @@ void setup()
     }
     Serial.println("[SETUP] Tao mutex rtcmDataMutex thanh cong!");
     
+    #if RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
     Serial.println("[SETUP] Task LoRa: Truyen du lieu RTCM qua LoRa.");
     xTaskCreatePinnedToCore(taskLora, "LoRa Task", 4096, nullptr, 1, nullptr, 0);
     Serial.println("[SETUP] Da khoi dong Task LoRa!");
@@ -87,6 +102,11 @@ void setup()
     Serial.println("[SETUP] Task RTCM: Doc du lieu RTCM tu UM980.");
     xTaskCreatePinnedToCore(taskRtcm, "RTCM Task", 4096, nullptr, 2, nullptr, 1);
     Serial.println("[SETUP] Da khoi dong Task RTCM!");
+    #elif RTCM_COMMUNICATION_PROTOCOL == TCP_IP
+    Serial.println("[SETUP] Task NTRIP: Gui du lieu RTCM qua NTRIP.");
+    xTaskCreatePinnedToCore(taskNtrip, "NTRIP Task", 4096, nullptr, 2, nullptr, 0);
+    Serial.println("[SETUP] Da khoi dong Task NTRIP!");
+    #endif
 
 
     Serial.println("[SETUP] Task Health: Gui thong tin suc khoe thiet bi len MQTT moi 30s");
@@ -104,12 +124,20 @@ void setup()
     digitalWrite(LED_PIN, LOW);
 }
 
+#if RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
 /* ================= TRIỂN KHAI HÀM TASK ====================== */
 __attribute__((noreturn)) void taskRtcm(void* parameter) {
     // Sử dụng chung rtcmBuffer với taskLora, cần mutex
     while (true) {
         if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)))
         {
+            if (!rtcmBuffer.isEmpty()) {
+                #if PROGRAM_DEBUG
+                Serial.println("[RTCM TASK] LoRa chua kip gui xong du lieu RTCM truoc do, dang doi de gui tiep...");
+                #endif
+                goto giveUpMutexRtcm;
+            }
+
             rtcmBuffer = receiveRtcmFromGnss();
             if (!rtcmBuffer.isEmpty()) {
                 Serial.println("[RTCM TASK] Da nhan du lieu RTCM tu mach RTK. So byte: " + String(rtcmBuffer.length()));
@@ -118,28 +146,58 @@ __attribute__((noreturn)) void taskRtcm(void* parameter) {
 
             }
             Serial.println();
+
+            giveUpMutexRtcm:
             xSemaphoreGive(rtcmBufferMutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
+#else
+__attribute__((noreturn)) void taskNtrip(void* parameter) {
+    int loopStatus = 0;
+    while (true) {
+        if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)))
+        {
+            loopStatus = loopNTRIP();
+            xSemaphoreGive(rtcmBufferMutex);
+        }
+        if (loopStatus == 504) {
+            Serial.println("[NTRIP TASK] Dang thu ket noi lai NTRIP...");
+            connectNTRIP();
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+#endif
 
+#if RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
 __attribute__((noreturn))void taskLora(void* parameter) {
     // Sử dụng chung rtcmBuffer với taskRtcm, cần mutex
-    char* rtcmCharArray = nullptr;
+    String tempRtcm = "";
+    bool lastStateWasEmpty = true;
     while (true) {
         if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS))) {
-            #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
+            #if RTCM_COMMUNICATION_PROTOCOL == TCP_IP
             loopNTRIP(latestGGA);
             #else
             if (rtcmBuffer.isEmpty()) {
+                #if PROGRAM_DEBUG
                 Serial.println("[LORA TASK] Chua co du lieu RTCM de truyen qua LoRa.");
-                goto giveUpMutex;
+                #endif
+                lastStateWasEmpty = true;
+                goto giveUpMutexLora;
             }
 
+            if (lastStateWasEmpty) {
+                tempRtcm = rtcmBuffer;
+                lastStateWasEmpty = false;
+            }
+
+            #if PROGRAM_DEBUG
             Serial.println("[LORA TASK] Chuan bi truyen du lieu RTCM qua LoRA...");
 
-            Serial.println("[LORA TASK] Noi dung duoc in ra theo hexa:");
+            Serial.println("[LORA TASK] Noi dung con lai trong buffer duoc in ra theo hexa:");
 
             for (int i = 0; i < rtcmBuffer.length(); i++) {
                 Serial.printf("%02X ", static_cast<uint8_t>(rtcmBuffer[i]));
@@ -150,36 +208,41 @@ __attribute__((noreturn))void taskLora(void* parameter) {
             }
 
             Serial.println();
+            #endif // PROGRAM_DEBUG
 
-            rtcmCharArray = new char[rtcmBuffer.length() + 1];
-            for (int i = 0; i < rtcmBuffer.length(); i++) {
-                rtcmCharArray[i] = rtcmBuffer[i];
+            lora_packet_process(rtcmBuffer);
+
+            if (rtcmBuffer.isEmpty() && !lastStateWasEmpty) {
+                latestRtcm = tempRtcm;
+                lastStateWasEmpty = true;
             }
 
-            loraSend(rtcmCharArray, rtcmBuffer.length());
-            Serial.printf("[LORA TASK] Da truyen du lieu RTCM qua LoRa.\n");
-
-            delete[] rtcmCharArray;
-            rtcmCharArray = nullptr;
-
-            latestRtcm = rtcmBuffer; // Cập nhật chuỗi RTCM mới nhất đã gửi đi
-            rtcmBuffer = ""; // Dọn buffer sau khi gửi
-
+            #if PROGRAM_DEBUG
             Serial.println("[LORA TASK] Da xoa du lieu RTCM trong buffer sau khi gui.");
+            #endif // PROGRAM_DEBUG
             #endif
 
-            giveUpMutex:
+            giveUpMutexLora:
             xSemaphoreGive(rtcmBufferMutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
+#endif
 
 __attribute__((noreturn)) void healthCheckTask(void* parameter) {
-    // không sử dụng tài nguyên chung, không cần mutex
+    // Có tranh chấp tài nguyên với task RTCM và NTRIP publish
     String healthPayload = "";
     while (true) {
-        healthPayload = formDeviceHealthString();
+        #if RTCM_COMMUNICATION_PROTOCOL == TCP_IP
+        if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)))
+            {
+                healthPayload = formDeviceHealthString();
+                xSemaphoreGive(rtcmBufferMutex);
+            }
+        #else
+            healthPayload = formDeviceHealthString();
+        #endif
         Serial.print("[HEALTH CHECK] ");
         Serial.println(healthPayload);
 
@@ -227,6 +290,12 @@ __attribute__((noreturn)) void healthCheckTask(void* parameter) {
 }
 
 void loop() {
+    if (!modem.isGprsConnected()) {
+        digitalWrite(LED_PIN, HIGH);
+        Serial.println("[LOOP] GPRS mat ket noi, dang thu ket noi lai...");
+        connectGSM();
+        digitalWrite(LED_PIN, LOW);
+    }
     if (!mqtt.connected()) {
         digitalWrite(LED_PIN, HIGH);
         Serial.println("[LOOP] MQTT mat ket noi, dang thu ket noi lai...");

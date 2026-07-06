@@ -8,18 +8,33 @@
 
 #ifdef DUMP_AT_COMMANDS
 #include <StreamDebugger.h>
-static StreamDebugger debugger(SerialAT, SerialMon);
+StreamDebugger debugger(SerialAT, SerialMon);
 TinyGsm        modem(debugger);
 #else
-TinyGsm        modem(Serial);
+TinyGsm        modem(SerialAT);
 #endif
 
 bool startSIM() {
+    
     int retrys = 1;
+ 
+    digitalWrite(LED_PIN, HIGH);
+    pinMode(MODEM_DC_PIN, OUTPUT);
+    digitalWrite(MODEM_DC_PIN, HIGH);
+    delay(1000);
+    digitalWrite(MODEM_DC_PIN, LOW);
+    SerialMon.println("[GSM] Doi modem SIM/GSM khoi dong (khoang 8 giay)...");
+    delay(9000);
+    digitalWrite(LED_PIN, LOW);
+
     SerialMon.println("[GSM] Khoi tao modem... So lan thu: " + String(retrys));
-    modem.restart();
+    
+    #ifndef NATIVE_BUILD
+    modem.init();
+    #endif
+
     String modemInfo = modem.getModemInfo();
-    while (modemInfo.isEmpty()) {
+    while (modemInfo.length() == 0) {
         if (retrys > 10) {
             SerialMon.println("[GSM] Lay thong tin modem that bai sau nhieu lan thu ! Khoi dong modem that bai !");
             return false;
@@ -27,14 +42,15 @@ bool startSIM() {
         SerialMon.println("[GSM] Lay thong tin modem that bai ! So lan thu: " 
             + String(retrys));
         delay(1000);
+        #ifndef NATIVE_BUILD
         modem.restart();
+        #endif
         modemInfo = modem.getModemInfo();
         retrys++;
     }
     SerialMon.print("[GSM] Khoi dong modem thanh cong.Thong tin modem: ");
     SerialMon.println(modemInfo);
-
-    SerialAT.begin(115200, SERIAL_8N1, RX_TO_MODEM_TX, TX_TO_MODEM_RX);
+    digitalWrite(LED_PIN, LOW);
 
     delay(3000);
     return true;
@@ -42,17 +58,34 @@ bool startSIM() {
 
 bool connectGSM() {
     uint8_t retries = 0;
-    while (retries < 10) {
+    while (retries <= 5) {
+        retries++;
         SerialMon.println("[GSM] Dang ket noi mang GSM...");
         if (modem.isNetworkConnected()) {
             SerialMon.println("[GSM] Mang GSM da ket noi.");
+            modem.gprsConnect(APN, GPRS_USER, GPRS_PASS);
+            if (modem.isGprsConnected()) {
+                SerialMon.println("[GSM] GPRS da ket noi.");
+                return true;
+            } else {
+                SerialMon.println("[GSM] GPRS chua ket noi.");
+            }
             return true;
         }
-        while (!modem.waitForNetwork(60000)) {
-            SerialMon.println("[GSM] Ket noi mang GSM that bai. Dang thu lai... So lan thu: " + String(retries));
-            retries++;
-            delay(10000);
+        SerialMon.println("[GSM] Chua ket noi duoc mang GSM ngay lap tuc. Dang doi...");
+        if (modem.waitForNetwork(30000)) {
+            delay(1000);
+            SerialMon.println("[GSM] Mang GSM da ket noi.");
+            modem.gprsConnect(APN, GPRS_USER, GPRS_PASS);
+            if (modem.isGprsConnected()) {
+                SerialMon.println("[GSM] GPRS da ket noi.");
+                return true;
+            } else {
+                SerialMon.println("[GSM] GPRS chua ket noi.");
+            }
         }
+        SerialMon.println("[GSM] Ket noi khong thanh cong, lan thu " + String(retries) + "...");
+        delay(5000);
     }
     SerialMon.println("[GSM] Ket noi mang GSM that bai sau " + String(retries) + " lan thu. Ket thuc ket noi !");
     return false;

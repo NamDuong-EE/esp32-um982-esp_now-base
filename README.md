@@ -86,7 +86,7 @@ Các cấu hình sau có thể được sửa trong file `Top_Lvl_Config.h` ho�
 - `LORAWAN_DEBUG_LEVEL`: Mức độ debug cho thư viện LoRaWAN từ 0 đến 2 (0 = tắt debug, 1 = cơ bản, 2 = chi tiết).
 - `CONNECT_USING_WIFI`: Kết nối mạng bằng WiFi (0 = tắt, 1 = bật).
 - `CONNECT_USING_4G`: Kết nối mạng bằng 4G (0 = tắt, 1 = bật). Nếu cấu hình này và `CONNECT_USING_WIFI` đều được bật, báo lỗi. Nếu cùng tắt, chọn WiFi.
-- `NMEA_COMMUNICATION_PROTOCOL`: Chồng giao thức truyền dữ liệu cải chính NTRIP (0 = qua TCP/IP stack, 1 = qua LoRa).
+- `RTCM_COMMUNICATION_PROTOCOL`: Chồng giao thức truyền dữ liệu cải chính NTRIP (0 = qua TCP/IP stack, 1 = qua LoRa).
 
 ### Cấu hình hoạt động:
 Các cấu hình sau được khai báo dưới dạng hằng số inline trong `include/Prog_Config.h` và có thể được sửa trực tiếp trong file này:

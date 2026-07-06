@@ -11,6 +11,10 @@
 #define WIFI_LORA_32_V4
 #endif
 
+#ifndef USE_KCT8103L_PA
+#define USE_KCT8103L_PA
+#endif
+
 #ifndef LORAWAN_DEBUG_LEVEL
 #define LORAWAN_DEBUG_LEVEL 1
 #endif
@@ -26,8 +30,8 @@
 #define TCP_IP 0
 #define LORA_SERIAL 1
 
-#ifndef NMEA_COMMUNICATION_PROTOCOL
-#define NMEA_COMMUNICATION_PROTOCOL TCP_IP // Chọn giữa TCP_IP hoặc LORA_SERIAL
+#ifndef RTCM_COMMUNICATION_PROTOCOL
+#define RTCM_COMMUNICATION_PROTOCOL TCP_IP // Chọn giữa TCP_IP hoặc LORA_SERIAL
 #endif
 
 // ==== CHỌN 1 TRONG 2 PHƯƠNG THỨC KẾT NỐI (KHÔNG ĐƯỢC CHỌN CẢ HAI) ====

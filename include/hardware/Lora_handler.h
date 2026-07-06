@@ -11,4 +11,21 @@ void OnTxDone( void );
 void OnTxTimeout( void );
 int loraSend(char* txData, int length);
 int loraSetup();
+
+inline void lora_packet_process(String& packet) {
+    int txLength = 0;
+    txLength = packet.length() > BUFFER_SIZE - 12 ? BUFFER_SIZE - 12 : packet.length() + 1;
+    auto* rtcmCharArray = new char[txLength];
+
+    for (int i = 0; i < txLength; i++) {
+        rtcmCharArray[i] = packet[i];
+    }
+
+    int result = loraSend(rtcmCharArray, txLength);
+    Serial.printf("[LORA HANDLER] Da truyen du lieu RTCM qua LoRa. Do dai: %d byte\n", txLength);
+    delete[] rtcmCharArray;
+
+    if (result == 0)
+        packet = packet.substring(txLength); // Cắt bỏ phần đã gửi, giữ lại phần chưa gửi (nếu có)
+}
 #endif
