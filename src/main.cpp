@@ -1,237 +1,116 @@
-#include "helper.h"
+#include <Arduino.h>
 
-// ================= ĐỊNH NGHĨA CÁC BIẾN TOÀN CỤC =================
-extern PubSubClient mqtt;
+#include "Prog_Config.h"
+#include "RtcmEspNowProtocol.h"
+#include "functions/Rtcm_Frame_Reader.h"
+#include "hardware/BaseEspnow_sender.h"
 
-String rtcmBuffer = "";
-unsigned long lastHealthCheck = 0;
-String latestRtcm = "";
+namespace {
+uint8_t rtcmFrame[RTCM_ESPNOW_MAX_FRAME_LENGTH] = {};
+uint32_t rtcmValidFrames = 0;
+uint32_t rtcmCrcErrors = 0;
+uint32_t rtcmTooLarge = 0;
+uint32_t rtcmSendOk = 0;
+uint32_t rtcmSendFail = 0;
 
-// Semaphore
-SemaphoreHandle_t rtcmBufferMutex = nullptr;
-
-/* ===================== NGUYÊN MẪU HÀM ======================== */
-
-__attribute__((noreturn)) void taskLora(void* parameter);
-__attribute__((noreturn)) void taskRtcm(void* parameter);
-__attribute__((noreturn)) void gnssPublishTask(void* parameter);
-__attribute__((noreturn)) void healthCheckTask(void* parameter);
-
-/* ==================SETUP VÀ LOOP======================== */
-
-void setup()
+[[noreturn]] void taskRtcm(void*)
 {
-    Serial.begin(115200);
-    Mcu.begin(HELTEC_BOARD,SLOW_CLK_TPYE);
-    unsigned long serialWaitStart = millis();
-    while (!Serial && (millis() - serialWaitStart) < 5000) {
-        delay(10);
-    }
-
-    // Debug marker: confirm Serial is working immediately after begin()
-    Serial.println("[DEBUG] Serial initialized");
-    Serial.println("\n=========================================");
-    Serial.println("     ESP32 GNSS GATEWAY KHOI DONG        ");
-    Serial.println("=========================================");
-
-    // Khởi tạo giao tiếp với UM980
-    Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS);
-    bool networkConnected = false;
-
-    int loraSetupResult = loraSetup();
-    if (loraSetupResult != 0) {
-        Serial.println("[SETUP][ERROR] Khoi dong LoRa that bai! Vui long kiem tra cau hinh va thu lai.");
-    } else {
-        Serial.println("[SETUP] Khoi dong LoRa thanh cong!");
-    }
-
-    while (!networkConnected) {
-#if CONNECT_USING_WIFI
-        Serial.println("[SETUP] Su dung ket noi WIFI");
-        networkConnected = setupWiFi();
-#endif
-#if CONNECT_USING_4G
-        Serial.println("[SETUP] Su dung ket noi SIM/GSM");
-        if (startSIM()) {
-            if (connectGSM()) {
-                networkConnected = true;
-            }
-        }
-#endif
-        if (networkConnected) {
-            Serial.println("[SETUP] Ket noi mang thanh cong!");
-            setupMQTT();
-            #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
-            setupNTRIP();
-            #endif
-        } else {
-            Serial.println("[ERROR] Khong the ket noi mang. Vui long kiem tra cau hinh va thu lai.");
-        }
-    }
-
-    Serial.println("[SETUP] Khoi dong cac task...");
-
-    Serial.println("[Setup] Tao mutex de dong bo hoa tai nguyen chung");
-
-    rtcmBufferMutex = xSemaphoreCreateMutex();
-    while (rtcmBufferMutex == nullptr) {
-        Serial.println("[ERROR] Tao mutex rtcmDataMutex that bai! Dang thu lai...");
-        rtcmBufferMutex = xSemaphoreCreateMutex();
-    }
-    Serial.println("[SETUP] Tao mutex rtcmDataMutex thanh cong!");
-    
-    Serial.println("[SETUP] Task LoRa: Truyen du lieu RTCM qua LoRa.");
-    xTaskCreatePinnedToCore(taskLora, "LoRa Task", 4096, nullptr, 1, nullptr, 0);
-    Serial.println("[SETUP] Da khoi dong Task LoRa!");
-
-    Serial.println("[SETUP] Task RTCM: Doc du lieu RTCM tu UM980.");
-    xTaskCreatePinnedToCore(taskRtcm, "RTCM Task", 4096, nullptr, 2, nullptr, 1);
-    Serial.println("[SETUP] Da khoi dong Task RTCM!");
-
-
-    Serial.println("[SETUP] Task Health: Gui thong tin suc khoe thiet bi len MQTT moi 30s");
-    xTaskCreatePinnedToCore(healthCheckTask, "Health Task", 4096, nullptr, 1, nullptr, 1);
-    Serial.println("[SETUP] Da khoi dong Task Health!");
-
-    Serial.println("=========================================");
-    Serial.println("        KHOI DONG HOAN TAT               ");
-    Serial.println("=========================================\n");
-
-    digitalWrite(LED_PIN, HIGH);
-
-    delay(1000);
-
-    digitalWrite(LED_PIN, LOW);
-}
-
-/* ================= TRIỂN KHAI HÀM TASK ====================== */
-__attribute__((noreturn)) void taskRtcm(void* parameter) {
-    // Sử dụng chung rtcmBuffer với taskLora, cần mutex
     while (true) {
-        if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)))
-        {
-            rtcmBuffer = receiveRtcmFromGnss();
-            if (!rtcmBuffer.isEmpty()) {
-                Serial.println("[RTCM TASK] Da nhan du lieu RTCM tu mach RTK. So byte: " + String(rtcmBuffer.length()));
+        size_t frameLength = 0;
+        const RtcmReadResult result =
+            readRtcmFrame(Serial1, rtcmFrame, sizeof(rtcmFrame), frameLength);
+
+        switch (result) {
+        case RtcmReadResult::FrameValid:
+            ++rtcmValidFrames;
+            Serial.printf("[BASE][GNSS] RTCM frame valid, length=%u\n",
+                          static_cast<unsigned>(frameLength));
+            if (baseEspNowSendRtcmFrame(rtcmFrame, frameLength)) {
+                ++rtcmSendOk;
             } else {
-                Serial.println("[RTCM TASK] Du lieu RTCM rong.");
-
+                ++rtcmSendFail;
             }
-            Serial.println();
-            xSemaphoreGive(rtcmBufferMutex);
+            break;
+
+        case RtcmReadResult::CrcError:
+            ++rtcmCrcErrors;
+            Serial.printf("[BASE][GNSS][WARN] RTCM CRC error, length=%u\n",
+                          static_cast<unsigned>(frameLength));
+            break;
+
+        case RtcmReadResult::FrameTooLarge:
+            ++rtcmTooLarge;
+            Serial.println("[BASE][GNSS][WARN] RTCM frame too large");
+            break;
+
+        case RtcmReadResult::None:
+            vTaskDelay(pdMS_TO_TICKS(2));
+            break;
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-__attribute__((noreturn))void taskLora(void* parameter) {
-    // Sử dụng chung rtcmBuffer với taskRtcm, cần mutex
-    char* rtcmCharArray = nullptr;
+[[noreturn]] void healthLogTask(void*)
+{
     while (true) {
-        if (xSemaphoreTake(rtcmBufferMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS))) {
-            #if NMEA_COMMUNICATION_PROTOCOL == TCP_IP
-            loopNTRIP(latestGGA);
-            #else
-            if (rtcmBuffer.isEmpty()) {
-                Serial.println("[LORA TASK] Chua co du lieu RTCM de truyen qua LoRa.");
-                goto giveUpMutex;
-            }
-
-            Serial.println("[LORA TASK] Chuan bi truyen du lieu RTCM qua LoRA...");
-
-            Serial.println("[LORA TASK] Noi dung duoc in ra theo hexa:");
-
-            for (int i = 0; i < rtcmBuffer.length(); i++) {
-                Serial.printf("%02X ", static_cast<uint8_t>(rtcmBuffer[i]));
-
-                if ((i + 1) % 16 == 0) {
-                    Serial.println();
-                }
-            }
-
-            Serial.println();
-
-            rtcmCharArray = new char[rtcmBuffer.length() + 1];
-            for (int i = 0; i < rtcmBuffer.length(); i++) {
-                rtcmCharArray[i] = rtcmBuffer[i];
-            }
-
-            loraSend(rtcmCharArray, rtcmBuffer.length());
-            Serial.printf("[LORA TASK] Da truyen du lieu RTCM qua LoRa.\n");
-
-            delete[] rtcmCharArray;
-            rtcmCharArray = nullptr;
-
-            latestRtcm = rtcmBuffer; // Cập nhật chuỗi RTCM mới nhất đã gửi đi
-            rtcmBuffer = ""; // Dọn buffer sau khi gửi
-
-            Serial.println("[LORA TASK] Da xoa du lieu RTCM trong buffer sau khi gui.");
-            #endif
-
-            giveUpMutex:
-            xSemaphoreGive(rtcmBufferMutex);
-        }
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-}
-
-__attribute__((noreturn)) void healthCheckTask(void* parameter) {
-    // không sử dụng tài nguyên chung, không cần mutex
-    String healthPayload = "";
-    while (true) {
-        healthPayload = formDeviceHealthString();
-        Serial.print("[HEALTH CHECK] ");
-        Serial.println(healthPayload);
-
-        if (healthPayload.isEmpty())
-        {
-            vTaskDelay(pdMS_TO_TICKS(HEALTH_INTERVAL));
-            continue;
-        }
-
-        #if PROGRAM_DEBUG
-        Serial.println("[HEALTH CHECK] Kiem tra ket noi MQTT de gui thong tin suc khoe...");
-        #endif
-        if (!mqtt.connected()) {
-            vTaskDelay(pdMS_TO_TICKS(HEALTH_INTERVAL));
-            continue;
-        }
-
-        #if PROGRAM_DEBUG
-        Serial.println("[HEALTH CHECK] MQTT dang ket noi, dang kich hoat loop...");
-        #endif
-        mqtt.loop();
-        #if PROGRAM_DEBUG
-        Serial.println("[HEALTH CHECK] Dang gui thong tin suc khoe len MQTT...");
-        #endif
-        publishHealth(healthPayload);
-
-        if (!latestRtcm.isEmpty()) {
-            #if PROGRAM_DEBUG
-            Serial.println("[GNSS PUBLISH] Dang kich hoat loop...");
-            #endif
-            mqtt.loop();
-            #if PROGRAM_DEBUG
-            Serial.println("[GNSS PUBLISH] Dang gui du lieu NMEA len MQTT...");
-            #endif
-            publishRaw(latestRtcm); // publishRaw accepts String&
-
-            /*Xóa tọa độ sau khi đã dùng để đánh giá sức khoẻ, nếu còn giữ, 
-            trong trường hợp không có dữ liệu mới, sẽ luôn báo GNSS OK dù 
-            thực tế đã mất tín hiệu. Việc này giúp phản ánh tình trạng thực tế hơn.*/ 
-            latestRtcm = "";
-        }
+        const BaseEspnowStats& espnow = getBaseEspnowStats();
+        Serial.printf(
+            "[BASE][HEALTH] rtcm_valid=%lu crc_error=%lu too_large=%lu frames_sent=%lu "
+            "frames_dropped=%lu fragments_sent=%lu send_fail=%lu send_timeout=%lu task_send_ok=%lu task_send_fail=%lu\n",
+            static_cast<unsigned long>(rtcmValidFrames),
+            static_cast<unsigned long>(rtcmCrcErrors),
+            static_cast<unsigned long>(rtcmTooLarge),
+            static_cast<unsigned long>(espnow.framesSent),
+            static_cast<unsigned long>(espnow.framesDropped),
+            static_cast<unsigned long>(espnow.fragmentsSent),
+            static_cast<unsigned long>(espnow.sendFailures),
+            static_cast<unsigned long>(espnow.sendTimeouts),
+            static_cast<unsigned long>(rtcmSendOk),
+            static_cast<unsigned long>(rtcmSendFail));
 
         vTaskDelay(pdMS_TO_TICKS(HEALTH_INTERVAL));
     }
 }
+}
 
-void loop() {
-    if (!mqtt.connected()) {
-        digitalWrite(LED_PIN, HIGH);
-        Serial.println("[LOOP] MQTT mat ket noi, dang thu ket noi lai...");
-        connectMQTT();
-        digitalWrite(LED_PIN, LOW);
+void setup()
+{
+    Serial.begin(115200);
+    const unsigned long serialWaitStart = millis();
+    while (!Serial && (millis() - serialWaitStart) < 3000) {
+        delay(10);
     }
-    vTaskDelay(pdMS_TO_TICKS(1000)); // loop trống, tất cả logic đã được xử lý trong các task
+
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+
+    Serial.println();
+    Serial.println("=========================================");
+    Serial.println("       ESP32 GNSS BASE ESP-NOW           ");
+    Serial.println("=========================================");
+
+    Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS);
+    Serial.printf("[BASE][GNSS] UART1 baud=%lu RX=%d TX=%d\n",
+                  static_cast<unsigned long>(GNSS_BAUD),
+                  RX_GNSS,
+                  TX_GNSS);
+
+    if (!setupEspNowBase()) {
+        Serial.println("[BASE][SETUP][ERROR] ESP-NOW init failed, restarting in 5s");
+        delay(5000);
+        ESP.restart();
+    }
+
+    xTaskCreatePinnedToCore(taskRtcm, "RTCM Task", 4096, nullptr, 2, nullptr, 1);
+    xTaskCreatePinnedToCore(healthLogTask, "Health Task", 4096, nullptr, 1, nullptr, 1);
+
+    Serial.println("[BASE][SETUP] Khoi dong hoan tat");
+    digitalWrite(LED_PIN, HIGH);
+    delay(200);
+    digitalWrite(LED_PIN, LOW);
+}
+
+void loop()
+{
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }

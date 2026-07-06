@@ -271,13 +271,13 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 1. [ ] Chốt phần cứng Base: ESP32U hay Heltec V4.
 2. [ ] Chốt GPIO UART nối UM980/UM982.
 3. [ ] Chốt `ESPNOW_WIFI_CHANNEL`.
-4. [ ] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
-5. [ ] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
-6. [ ] Thêm `Rtcm_Frame_Reader` đọc RTCM3 nhị phân từ UART.
-7. [ ] Thêm `BaseEspnow_sender`.
-8. [ ] Sửa `main.cpp` bỏ LoRa/NTRIP/MQTT khỏi field mode.
-9. [ ] Dọn `platformio.ini`.
-10. [ ] Build firmware `esp32u_base_espnow`.
+4. [x] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
+5. [x] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
+6. [x] Thêm `Rtcm_Frame_Reader` đọc RTCM3 nhị phân từ UART.
+7. [x] Thêm `BaseEspnow_sender`.
+8. [x] Sửa `main.cpp` bỏ LoRa/NTRIP/MQTT khỏi field mode.
+9. [x] Dọn `platformio.ini`.
+10. [x] Build firmware `esp32u_base_espnow`.
 11. [ ] Test Base đọc được RTCM từ UM980/982.
 12. [ ] Test Base gửi ESP-NOW tới Rover cùng channel.
 13. [ ] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
@@ -309,3 +309,15 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 ## Kết luận
 
 Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay LoRa sender bằng ESP-NOW sender và thay cách đọc RTCM kiểu `String` bằng parser RTCM3 nhị phân đúng chuẩn. Sau khi Base gửi đúng protocol, Rover hiện tại có thể nhận, reassembly và ghi RTCM vào UM980/982 để đạt RTK.
+
+## Tiến độ công việc
+
+### 2026-07-06
+
+- Đã thêm `include/RtcmEspNowProtocol.h` với header 16 byte, payload fragment tối đa 234 byte và frame RTCM tối đa 1029 byte.
+- Đã thêm `include/functions/Rtcm_Frame_Reader.h` và `src/functions/Rtcm_Frame_Reader.cpp` để đọc RTCM3 dạng nhị phân từ UART, kiểm tra preamble, length và CRC24Q.
+- Đã thêm `include/hardware/BaseEspnow_sender.h` và `src/hardware/BaseEspnow_sender.cpp` để khởi tạo ESP-NOW STA field mode, add peer Rover, chia RTCM frame thành fragment và gửi unicast có retry/counter.
+- Đã rút gọn `src/main.cpp`: bỏ luồng LoRa/NTRIP/MQTT khỏi field mode, chỉ còn UART GNSS, ESP-NOW Base, task đọc/gửi RTCM và health log qua Serial USB.
+- Đã dọn `platformio.ini` còn env chính `esp32u_base_espnow`, build đúng các module firmware Base ESP-NOW mới và `lib_ignore` các mock library cũ để không shadow `WiFi.h` của Arduino ESP32.
+- Đã cập nhật `include/Prog_Config.h` theo cấu hình tạm ESP32U/ESP32 dev board: UART `RX_GNSS=16`, `TX_GNSS=17`, channel ESP-NOW `6`, Rover MAC `58:2A:BD:71:E4:F0`.
+- Đã build thành công lại sau khi điền MAC Rover bằng `C:\Python314\python.exe -m platformio run -e esp32u_base_espnow`. Kết quả PlatformIO: RAM dùng 44,600 bytes trên 327,680 bytes (13.6%), Flash dùng 736,077 bytes trên 1,310,720 bytes (56.2%).
