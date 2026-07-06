@@ -88,7 +88,7 @@ bool setupEspNowBase()
     }
 
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect(true, true);
+    WiFi.disconnect(false, true);
     delay(50);
 
     esp_wifi_set_ps(WIFI_PS_NONE);

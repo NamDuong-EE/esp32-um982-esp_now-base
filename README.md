@@ -56,8 +56,9 @@ Base không nhận correction từ NTRIP caster nữa. Base là trạm phát cor
 Các cấu hình dự kiến đặt trong `include/Prog_Config.h`:
 
 ```cpp
-inline constexpr int RX_GNSS = 16; // UM980/982 TX -> ESP32 RX
-inline constexpr int TX_GNSS = 17; // UM980/982 RX -> ESP32 TX
+inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
+inline constexpr int RX_GNSS = 16; // UM980/982 TX2 -> ESP32 RX GPIO16
+inline constexpr int TX_GNSS = 17; // UM980/982 RX2 <- ESP32 TX GPIO17
 inline constexpr uint32_t GNSS_BAUD = 115200;
 
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
@@ -71,9 +72,21 @@ inline constexpr uint8_t ESPNOW_ROVER_MAC[6] = {
 inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
 inline constexpr uint8_t ESPNOW_PMK[16] = {0};
 inline constexpr uint8_t ESPNOW_LMK[16] = {0};
+
+inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = true;
+inline constexpr bool DEBUG_RTCM_HEX_DUMP = true;
+inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
 ```
 
-Cần xác nhận lại chân UART thực tế của PCB Base. Repo cũ đang dùng cấu hình Heltec V4 với `RX_GNSS = 41`, `TX_GNSS = 42`; nếu chuyển sang ESP32U/ESP32 dev board thì nhiều khả năng sẽ dùng GPIO16/GPIO17 giống Rover.
+Base hiện chọn dùng cổng UART2 của UM980/UM982:
+
+```text
+UM980/UM982 TX2  -> ESP32 GPIO16 / RX_GNSS
+UM980/UM982 RX2  <- ESP32 GPIO17 / TX_GNSS
+UM980/UM982 GND  -- ESP32 GND
+```
+
+Repo cũ từng dùng cấu hình Heltec V4 với `RX_GNSS = 41`, `TX_GNSS = 42`; nếu đổi phần cứng hoặc đổi sang UART khác của UM980/UM982 thì cần sửa lại `RX_GNSS`, `TX_GNSS` và cấu hình output RTCM trên module GNSS cho đúng cổng.
 
 ## Giao thức RTCM qua ESP-NOW
 
@@ -225,6 +238,132 @@ build_flags =
     -DFIRMWARE_ROLE_BASE=1
 ```
 
+## Cách nạp firmware vào ESP32 Base
+
+Firmware Base ESP-NOW nên được nạp bằng PlatformIO vì repo dùng `platformio.ini` và env chính `esp32u_base_espnow`.
+
+### 1. Chuẩn bị
+
+- Dùng cáp USB có truyền dữ liệu, không dùng cáp chỉ sạc.
+- Cài driver USB-UART đúng với board ESP32 nếu máy chưa nhận cổng COM:
+  - CP210x cho nhiều board ESP32 DevKit/ESP32U;
+  - CH340/CH9102 nếu board dùng chip USB-UART loại này.
+- Cắm ESP32 Base vào máy tính.
+- Mở Device Manager trên Windows và xem cổng COM mới xuất hiện, ví dụ `COM5`.
+- Kiểm tra cấu hình trong `include/Prog_Config.h` trước khi nạp:
+  - `RX_GNSS = 16`;
+  - `TX_GNSS = 17`;
+  - dây nối `UM980 TX2 -> ESP32 GPIO16`, `UM980 RX2 -> ESP32 GPIO17`, `GND -> GND`;
+  - `ESPNOW_WIFI_CHANNEL = 6`;
+  - `ESPNOW_ROVER_MAC = 58:2A:BD:71:E4:F0`.
+
+### 2. Build kiểm tra trước khi nạp
+
+Mở PowerShell tại thư mục repo:
+
+```powershell
+cd C:\Users\admin\Documents\GitHub\esp32-um982-lora-base
+```
+
+Nếu `pio` đã có trong PATH:
+
+```powershell
+pio run -e esp32u_base_espnow
+```
+
+Nếu máy đang dùng PlatformIO qua Python 3.14 như lần build hiện tại:
+
+```powershell
+C:\Python314\python.exe -m platformio run -e esp32u_base_espnow
+```
+
+Build thành công sẽ có dòng:
+
+```text
+[SUCCESS] Took ... seconds
+```
+
+### 3. Nạp firmware
+
+Thay `COM5` bằng cổng COM thực tế của ESP32 Base.
+
+Nếu `pio` đã có trong PATH:
+
+```powershell
+pio run -e esp32u_base_espnow -t upload --upload-port COM5
+```
+
+Nếu dùng Python 3.14:
+
+```powershell
+C:\Python314\python.exe -m platformio run -e esp32u_base_espnow -t upload --upload-port COM5
+```
+
+Khi upload chạy, nếu log đứng ở đoạn `Connecting...`, giữ nút `BOOT` trên ESP32, bấm nhả `EN/RESET`, sau đó thả `BOOT` khi bắt đầu ghi flash. Một số board tự reset được thì không cần thao tác này.
+
+Upload thành công sẽ có dòng gần giống:
+
+```text
+Hash of data verified.
+Hard resetting via RTS pin...
+```
+
+### 4. Mở Serial Monitor sau khi nạp
+
+Baud monitor là `115200`.
+
+Nếu `pio` đã có trong PATH:
+
+```powershell
+pio device monitor -p COM5 -b 115200
+```
+
+Nếu dùng Python 3.14:
+
+```powershell
+C:\Python314\python.exe -m platformio device monitor -p COM5 -b 115200
+```
+
+Sau khi monitor mở, bấm `EN/RESET` trên ESP32 Base. Log mong đợi:
+
+```text
+[BASE][GNSS] ESP32 Serial1 reading UM980 UART2 TX2/RX2, baud=115200 RX=16 TX=17
+[BASE][DEBUG] uart_raw_dump=on rtcm_hex_dump=on
+[WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW
+[WIFI] Local STA MAC: XX:XX:XX:XX:XX:XX
+[WIFI] ESP-NOW fixed channel: 6
+[BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
+[BASE][SETUP] Khoi dong hoan tat
+```
+
+Khi UM980/UM982 Base bắt đầu xuất RTCM hợp lệ qua UART, log sẽ có:
+
+```text
+[BASE][GNSS][UART_RAW] 00000000: D3 ...
+[BASE][GNSS] RTCM frame valid, length=...
+[BASE][GNSS][RTCM_HEX] valid length=...
+[BASE][GNSS][RTCM_HEX] 0000: D3 ...
+[BASE][HEALTH] uart_available=... uart_raw_bytes=... rtcm_valid=..., frames_sent=..., fragments_sent=..., send_fail=...
+```
+
+`DEBUG_GNSS_UART_RAW_DUMP = true` sẽ in mọi byte thô ESP32 đọc được từ `Serial1` trước khi parser kiểm tra RTCM. Nếu không thấy dòng `[UART_RAW]` thì ESP32 chưa nhận byte nào từ UM980/UM982: cần kiểm tra dây TX/RX, GND, baudrate và cổng UART output trên module GNSS.
+
+Nếu health log vẫn không có trường `uart_available` và `uart_raw_bytes`, ESP32 đang chạy firmware cũ và cần nạp lại đúng binary mới.
+
+`DEBUG_RTCM_HEX_DUMP = true` sẽ in toàn bộ frame RTCM nhận từ UM980/UM982 ra Serial USB ở dạng HEX. Khi chạy ổn định có thể đổi về `false` trong `include/Prog_Config.h` để giảm log và tránh nghẽn Serial.
+
+### 5. Lỗi nạp thường gặp
+
+| Hiện tượng | Cách xử lý |
+|---|---|
+| Không thấy cổng COM | Đổi cáp USB, cài driver CP210x/CH340/CH9102, rút cắm lại board |
+| Upload đứng ở `Connecting...` | Giữ `BOOT`, bấm nhả `EN/RESET`, thả `BOOT` khi bắt đầu ghi |
+| `Access is denied` khi upload | Đóng Serial Monitor/Arduino IDE/terminal khác đang giữ COM |
+| Log Serial rác | Chọn đúng baud `115200` |
+| Không thấy log sau khi nạp | Mở monitor rồi bấm `EN/RESET` |
+| Base không gửi được tới Rover | Kiểm tra Rover đang chạy cùng `ESPNOW_WIFI_CHANNEL` và MAC STA đúng |
+| `[BASE][ESP-NOW][ERROR] esp_wifi_set_channel failed: 12289` | Wi-Fi driver chưa init hoặc đã bị tắt trước khi set channel. Trong code phải dùng `WiFi.mode(WIFI_STA)` rồi `WiFi.disconnect(false, true)`, không dùng `WiFi.disconnect(true, true)` vì tham số `true` đầu sẽ tắt Wi-Fi radio |
+
 Sau khi chuyển xong có thể bỏ:
 
 - thư viện Heltec LoRa;
@@ -269,7 +408,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 ## Checklist triển khai
 
 1. [ ] Chốt phần cứng Base: ESP32U hay Heltec V4.
-2. [ ] Chốt GPIO UART nối UM980/UM982.
+2. [x] Chốt GPIO UART nối UM980/UM982: dùng UM980 UART2 `TX2/RX2`, nối `TX2 -> GPIO16`, `RX2 -> GPIO17`, chung GND.
 3. [ ] Chốt `ESPNOW_WIFI_CHANNEL`.
 4. [x] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
 5. [x] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
@@ -285,7 +424,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 ## Log mong đợi sau khi hoàn thiện
 
 ```text
-[BASE][GNSS] UART1 baud=115200 RX=16 TX=17
+[BASE][GNSS] ESP32 Serial1 reading UM980 UART2 TX2/RX2, baud=115200 RX=16 TX=17
 [WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW
 [WIFI] Local STA MAC: XX:XX:XX:XX:XX:XX
 [WIFI] ESP-NOW fixed channel: 6
@@ -319,5 +458,11 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm `include/hardware/BaseEspnow_sender.h` và `src/hardware/BaseEspnow_sender.cpp` để khởi tạo ESP-NOW STA field mode, add peer Rover, chia RTCM frame thành fragment và gửi unicast có retry/counter.
 - Đã rút gọn `src/main.cpp`: bỏ luồng LoRa/NTRIP/MQTT khỏi field mode, chỉ còn UART GNSS, ESP-NOW Base, task đọc/gửi RTCM và health log qua Serial USB.
 - Đã dọn `platformio.ini` còn env chính `esp32u_base_espnow`, build đúng các module firmware Base ESP-NOW mới và `lib_ignore` các mock library cũ để không shadow `WiFi.h` của Arduino ESP32.
-- Đã cập nhật `include/Prog_Config.h` theo cấu hình tạm ESP32U/ESP32 dev board: UART `RX_GNSS=16`, `TX_GNSS=17`, channel ESP-NOW `6`, Rover MAC `58:2A:BD:71:E4:F0`.
+- Đã cập nhật `include/Prog_Config.h` theo cấu hình ESP32U/ESP32 dev board: dùng UM980 UART2 `TX2/RX2`, `RX_GNSS=16`, `TX_GNSS=17`, channel ESP-NOW `6`, Rover MAC `58:2A:BD:71:E4:F0`.
 - Đã build thành công lại sau khi điền MAC Rover bằng `C:\Python314\python.exe -m platformio run -e esp32u_base_espnow`. Kết quả PlatformIO: RAM dùng 44,600 bytes trên 327,680 bytes (13.6%), Flash dùng 736,077 bytes trên 1,310,720 bytes (56.2%).
+- Đã thêm mục "Cách nạp firmware vào ESP32 Base" với hướng dẫn build, upload, mở Serial Monitor và xử lý lỗi nạp thường gặp trên Windows.
+- Đã sửa lỗi ESP-NOW init `esp_wifi_set_channel failed: 12289` bằng cách đổi `WiFi.disconnect(true, true)` thành `WiFi.disconnect(false, true)` để không tắt Wi-Fi radio trước khi set channel. Build lại `esp32u_base_espnow` thành công.
+- Đã thêm cấu hình `DEBUG_RTCM_HEX_DUMP` và hàm dump HEX để in toàn bộ frame RTCM nhận từ UM980/UM982 ra Serial USB khi debug.
+- Đã thêm cấu hình `DEBUG_GNSS_UART_RAW_DUMP` để in mọi byte thô đọc được từ UART GNSS trước parser RTCM, giúp phân biệt lỗi không có tín hiệu UART với lỗi chưa ghép được frame RTCM hợp lệ.
+- Đã bổ sung `uart_available` và `uart_raw_bytes` vào health log để xác nhận ESP32 có nhận byte UART từ UM980/UM982 hay chưa, kể cả khi chưa có frame RTCM hợp lệ.
+- Đã cập nhật nhãn cấu hình/log/README theo phần cứng dự kiến chưa hàn: UM980/UM982 dùng UART2 `TX2/RX2` nối sang ESP32 GPIO16/GPIO17.

@@ -1,5 +1,7 @@
 #include "functions/Rtcm_Frame_Reader.h"
 
+#include "Prog_Config.h"
+
 namespace {
 enum class ReaderState {
     WaitPreamble,
@@ -11,6 +13,8 @@ enum class ReaderState {
 ReaderState state = ReaderState::WaitPreamble;
 size_t writeIndex = 0;
 size_t expectedLength = 0;
+uint32_t rawByteOffset = 0;
+uint8_t rawLineByteCount = 0;
 
 void resetState()
 {
@@ -18,11 +22,46 @@ void resetState()
     writeIndex = 0;
     expectedLength = 0;
 }
+
+void dumpRawUartByte(uint8_t byte)
+{
+    if (!DEBUG_GNSS_UART_RAW_DUMP) {
+        return;
+    }
+
+    if (rawLineByteCount == 0) {
+        Serial.printf("[BASE][GNSS][UART_RAW] %08lu: ", static_cast<unsigned long>(rawByteOffset));
+    }
+
+    Serial.printf("%02X", byte);
+    ++rawByteOffset;
+    ++rawLineByteCount;
+
+    if (rawLineByteCount >= DEBUG_RTCM_HEX_BYTES_PER_LINE) {
+        Serial.println();
+        rawLineByteCount = 0;
+    } else {
+        Serial.print(' ');
+    }
+}
 }
 
 void resetRtcmFrameReader()
 {
     resetState();
+}
+
+void flushRtcmDebugLine()
+{
+    if (DEBUG_GNSS_UART_RAW_DUMP && rawLineByteCount != 0) {
+        Serial.println();
+        rawLineByteCount = 0;
+    }
+}
+
+uint32_t getRtcmRawByteCount()
+{
+    return rawByteOffset;
 }
 
 uint32_t rtcmCrc24q(const uint8_t* data, size_t length)
@@ -52,6 +91,7 @@ RtcmReadResult readRtcmFrame(Stream& input, uint8_t* frame, size_t capacity, siz
         }
 
         const uint8_t byte = static_cast<uint8_t>(value);
+        dumpRawUartByte(byte);
 
         switch (state) {
         case ReaderState::WaitPreamble:

@@ -15,6 +15,8 @@ enum class RtcmReadResult {
 };
 
 void resetRtcmFrameReader();
+void flushRtcmDebugLine();
+uint32_t getRtcmRawByteCount();
 uint32_t rtcmCrc24q(const uint8_t* data, size_t length);
 RtcmReadResult readRtcmFrame(Stream& input, uint8_t* frame, size_t capacity, size_t& frameLength);
 

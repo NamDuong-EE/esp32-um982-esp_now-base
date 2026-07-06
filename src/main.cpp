@@ -13,6 +13,32 @@ uint32_t rtcmTooLarge = 0;
 uint32_t rtcmSendOk = 0;
 uint32_t rtcmSendFail = 0;
 
+void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLength)
+{
+    if (!DEBUG_RTCM_HEX_DUMP || frame == nullptr || frameLength == 0) {
+        return;
+    }
+
+    Serial.printf("[BASE][GNSS][RTCM_HEX] %s length=%u\n",
+                  label,
+                  static_cast<unsigned>(frameLength));
+
+    for (size_t i = 0; i < frameLength; ++i) {
+        if ((i % DEBUG_RTCM_HEX_BYTES_PER_LINE) == 0) {
+            Serial.printf("[BASE][GNSS][RTCM_HEX] %04u: ", static_cast<unsigned>(i));
+        }
+
+        Serial.printf("%02X", frame[i]);
+
+        if ((i % DEBUG_RTCM_HEX_BYTES_PER_LINE) == (DEBUG_RTCM_HEX_BYTES_PER_LINE - 1) ||
+            i == (frameLength - 1)) {
+            Serial.println();
+        } else {
+            Serial.print(' ');
+        }
+    }
+}
+
 [[noreturn]] void taskRtcm(void*)
 {
     while (true) {
@@ -23,8 +49,10 @@ uint32_t rtcmSendFail = 0;
         switch (result) {
         case RtcmReadResult::FrameValid:
             ++rtcmValidFrames;
+            flushRtcmDebugLine();
             Serial.printf("[BASE][GNSS] RTCM frame valid, length=%u\n",
                           static_cast<unsigned>(frameLength));
+            dumpRtcmFrameHex("valid", rtcmFrame, frameLength);
             if (baseEspNowSendRtcmFrame(rtcmFrame, frameLength)) {
                 ++rtcmSendOk;
             } else {
@@ -34,12 +62,15 @@ uint32_t rtcmSendFail = 0;
 
         case RtcmReadResult::CrcError:
             ++rtcmCrcErrors;
+            flushRtcmDebugLine();
             Serial.printf("[BASE][GNSS][WARN] RTCM CRC error, length=%u\n",
                           static_cast<unsigned>(frameLength));
+            dumpRtcmFrameHex("crc_error", rtcmFrame, frameLength);
             break;
 
         case RtcmReadResult::FrameTooLarge:
             ++rtcmTooLarge;
+            flushRtcmDebugLine();
             Serial.println("[BASE][GNSS][WARN] RTCM frame too large");
             break;
 
@@ -54,9 +85,13 @@ uint32_t rtcmSendFail = 0;
 {
     while (true) {
         const BaseEspnowStats& espnow = getBaseEspnowStats();
+        flushRtcmDebugLine();
         Serial.printf(
-            "[BASE][HEALTH] rtcm_valid=%lu crc_error=%lu too_large=%lu frames_sent=%lu "
-            "frames_dropped=%lu fragments_sent=%lu send_fail=%lu send_timeout=%lu task_send_ok=%lu task_send_fail=%lu\n",
+            "[BASE][HEALTH] uart_available=%d uart_raw_bytes=%lu rtcm_valid=%lu crc_error=%lu "
+            "too_large=%lu frames_sent=%lu frames_dropped=%lu fragments_sent=%lu send_fail=%lu "
+            "send_timeout=%lu task_send_ok=%lu task_send_fail=%lu\n",
+            Serial1.available(),
+            static_cast<unsigned long>(getRtcmRawByteCount()),
             static_cast<unsigned long>(rtcmValidFrames),
             static_cast<unsigned long>(rtcmCrcErrors),
             static_cast<unsigned long>(rtcmTooLarge),
@@ -90,10 +125,14 @@ void setup()
     Serial.println("=========================================");
 
     Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS);
-    Serial.printf("[BASE][GNSS] UART1 baud=%lu RX=%d TX=%d\n",
+    Serial.printf("[BASE][GNSS] ESP32 Serial1 reading %s, baud=%lu RX=%d TX=%d\n",
+                  GNSS_UART_PORT_NAME,
                   static_cast<unsigned long>(GNSS_BAUD),
                   RX_GNSS,
                   TX_GNSS);
+    Serial.printf("[BASE][DEBUG] uart_raw_dump=%s rtcm_hex_dump=%s\n",
+                  DEBUG_GNSS_UART_RAW_DUMP ? "on" : "off",
+                  DEBUG_RTCM_HEX_DUMP ? "on" : "off");
 
     if (!setupEspNowBase()) {
         Serial.println("[BASE][SETUP][ERROR] ESP-NOW init failed, restarting in 5s");
