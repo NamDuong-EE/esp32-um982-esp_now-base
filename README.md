@@ -1,100 +1,311 @@
-# ESP32 GNSS Gateway (UM980 / UM982)
+# ESP32 GNSS Base ESP-NOW
 
-Firmware dành cho vi điều khiển ESP32 (ví dụ board TDM2402) đóng vai trò làm Gateway kết nối với module GNSS định vị động học thời gian thực (RTK) như Unicore UM980 hoặc UM982. 
+Firmware Base dùng ESP32 kết nối với UM980/UM982 qua UART, đọc dữ liệu RTCM3 do module GNSS Base xuất ra, chia gói và gửi sang Rover bằng ESP-NOW Long Range. Repo này sẽ được chuyển từ kiến trúc cũ dùng LoRa/NTRIP/MQTT sang kiến trúc Base ESP-NOW chuyên dụng.
 
-## Tính năng chính
-- **Giao tiếp GNSS**: Đọc dữ liệu NMEA (như `$GNGGA`, `$GPGGA`) từ module UM980/UM982 qua Serial.
-- **Phân tích dữ liệu**: Trích xuất các thông số tọa độ (Latitude, Longitude), số lượng vệ tinh, trạng thái RTK từ chuỗi NMEA và đóng gói thành định dạng JSON.
-- **MQTT Publisher**: Gửi dữ liệu vị trí JSON lên MQTT Broker để giám sát tọa độ theo thời gian thực.
-- **Giám sát trạng thái (Health Check)**: Định kỳ báo cáo các thông số như RAM trống, Uptime, cường độ tín hiệu WiFi, trạng thái MQTT/NTRIP và chất lượng dữ liệu GNSS.
-- **NTRIP Client over IP**: Kết nối đến NTRIP Caster qua mạng IP, nhận dữ liệu cải chính định vị (RTCM) và đẩy ngược lại cho module GNSS để đạt được độ chính xác RTK (mức cm). Hỗ trợ truyền lại chuỗi GGA cho Caster để xác thực.
-
-## Yêu cầu môi trường và thiết bị
-- Môi trường phát triển: PlatformIO IDE hoặc bất kỳ IDE nào hỗ trợ PlatformIO.
-- Bảng mạch được hỗ trợ: esp32dev (TDM240x series), Heltec WiFi LoRa 32 V4 (có thể chỉnh trong `platformio.ini`).
-- Module GNSS: Unicore UM980 hoặc UM982 (kết nối qua UART).
-- Các thư viện được sử dụng:
-    - `Arduino` cho lập trình cơ bản trên ESP32.
-    - `PubSubClient` cho MQTT.
-    - `WiFi` cho kết nối mạng WiFi.
-    - `TinyGSM` cho kết nối mạng 4G (nếu sử dụng modem 4G).
-    - `LoRaWANHeltec ESP32 Dev-Boards` cung cấp các thư viện LoRa nếu sử dụng Heltec V4, bao gồm thư viện `LoRaWan_APP`.
-    - `ArduinoJson` để xử lý JSON.
-
-## Tổ chức mã nguồn:
-### Tổ chức nhánh:
-- `main`: Nhánh chính chứa mã nguồn ổn định, đã được kiểm tra kỹ lưỡng. Chỉ được nhận merge từ nhánh `develop` dưới dạng squash commit để giữ lịch sử sạch sẽ. Không được phép merge trực tiếp vào `main` từ các nhánh tính năng hoặc test.
-- `develop`: Nhánh phát triển, cũng là nhánh mặc định trên GitHub, nơi các tính năng mới được thêm vào và thử nghiệm. Sau khi hoàn thiện và kiểm tra, các thay đổi sẽ được merge vào nhánh `main`. Squash commit từ `main` phải được merge ngược lại vào `develop` ngay sau khi merge để đồng bộ lịch sử.
-- `feature/<tên-tính-năng>`: Các nhánh tính năng riêng biệt để phát triển các tính năng mới hoặc sửa lỗi cụ thể. Sau khi hoàn thành, sẽ được merge vào `develop`.
-- `feature-test/<tên-tính-năng>`: Các nhánh riêng để viết và chạy unit test cho các tính năng tương ứng với các nhánh `feature/<tên-tính-năng>`. Sau khi hoàn thành, sẽ được merge vào `feature/<tên-tính-năng>`. Khi nhánh `feature/<tên-tính-năng>` bị xoá, nhánh `feature-test/<tên-tính-năng>` sẽ được xoá.
-- `documentation`: Các nhánh riêng để viết tài liệu hướng dẫn sử dụng, cấu hình, v.v. Sau khi hoàn thành phần tài liệu, sẽ được merge vào `develop`. Nhánh này chỉ được phép merge vào `develop` và cũng chỉ được nhận merge từ `develop` để đồng bộ.
-
-### Tổ chức thư mục:
-```
-├── .pio/           # Thư mục do PlatformIO tạo ra chứa file biên dịch, 
-|               thư viện đã cài, v.v. Không chỉnh sửa trực tiếp.
-|               thư mục này không xuất hiện trong repo vì đã được thêm vào .gitignore
-| 
-├── boards/
-|   └── heltec_wifi_lora_32_v4.json  # Cấu hình PlatformIO để biên dịch
-|                                     mã nguồn cho Heltec V4
-|                                     (đây là file tuỳ chỉnh do PlatformIO chưa
-|                                     duyệt cấu hình Heltec V4 chính thức)
-| 
-├──lib/                             # Thư viện riêng của dự án (hiện chưa cần thiết).
-|                                  Sẽ được biên dịch thành thư viện liên kết tĩnh
-| 
-├──include/                         # Header files chứa cấu hình, định nghĩa hằng số,
-|   |                                 khai báo biến, đối tượng và prototype của hàm.
-|   |                                 Ngoại trừ main không có header và một số header
-|   |                                 được khai báo trong đoạn markdown này,
-|   |                                 các file header còn lại được đặt tên và tổ chức hoàn toàn
-|   |                                 giống với tên và vị trí file .cpp tương ứng trong src/
-|   |
-|   ├── Top_Lvl_Config.h            # Cấu hình cấp cao trước khi biên dịch
-|   └── Prog_Config.h               # Cấu hình hoạt động của chương trình
-| 
-├──src/                             # Mã nguồn chính của chương trình.
-|    ├── main.cpp                       # Điểm vào chính của chương trình, chứa hàm setup() và loop()
-|    ├── helper.cpp                     # Các hàm phụ trợ để xử lý dữ liệu, kết nối, v.v.
-|    ├── functions/                      # Thư mục con chứa các hàm được tổ chức theo chức năng (MQTT, NTRIP, NMEA parsing)
-|    |  ├── MQTT_Manager.cpp                     # Hàm xử lý kết nối và gửi dữ liệu qua MQTT
-|    |  ├── NTRIP_Handler_IP.cpp                 # Hàm xử lý kết nối và nhận dữ liệu từ NTRIP Caster qua IP
-|    |  └── NMEA_Parser.cpp                      # Hàm xử lý phân tích chuỗi NMEA
-|    └──hardware/                       # Thư mục con chứa các hàm liên quan đến phần cứng (wifi, 4g, lora)
-|       ├── WiFi_handler.cpp                     # Hàm xử lý kết nối WiFi
-|       ├── Sim_handler.cpp                      # Hàm xử lý kết nối 4G
-|       └── LoRa_handler.cpp                     # Hàm xử lý kết nối LoRa
-|
-├──test/                            # Thư mục dành cho việc viết unit test
-|                                  và sử dụng PlatformIO Test Runner.
-| 
-├──variants/                        # Cấu hình biến thể phần cứng (ví dụ: Heltec V4, TDM2402)
-|   |                                được định nghĩa dưới dạng macro trong file header (.h)
-|   |
-|   └── heltec_V4
-|           |
-|           └── pins_arduino.h     # Định nghĩa chân GPIO cho board Heltec V4
-|     
-└──platformio.ini                    # File cấu hình chính của PlatformIO, xác định board,
+```text
+UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ──> ESP32 Rover ── UART ──> UM980/982 Rover
 ```
 
-## Cấu hình chương trình và hệ thống:
-### Cấu hình cấp cao trước khi biên dịch, được lưu trong `include/Top_Lvl_Config.h`:
-Các cấu hình sau có thể được sửa trong file `Top_Lvl_Config.h` hoặc đưa vào dưới dạng tham số biên dịch trong `platformio.ini` (`-D<MACRO>[=<VALUE>]`).
-- `WIFI_LORA_32_V4`: Định nghĩa loại cấu hình phần cứng (ví dụ Heltec V4).
-- `LORAWAN_DEBUG_LEVEL`: Mức độ debug cho thư viện LoRaWAN từ 0 đến 2 (0 = tắt debug, 1 = cơ bản, 2 = chi tiết).
-- `CONNECT_USING_WIFI`: Kết nối mạng bằng WiFi (0 = tắt, 1 = bật).
-- `CONNECT_USING_4G`: Kết nối mạng bằng 4G (0 = tắt, 1 = bật). Nếu cấu hình này và `CONNECT_USING_WIFI` đều được bật, báo lỗi. Nếu cùng tắt, chọn WiFi.
-- `NMEA_COMMUNICATION_PROTOCOL`: Chồng giao thức truyền dữ liệu cải chính NTRIP (0 = qua TCP/IP stack, 1 = qua LoRa).
+## Mục tiêu chuyển đổi
 
-### Cấu hình hoạt động:
-Các cấu hình sau được khai báo dưới dạng hằng số inline trong `include/Prog_Config.h` và có thể được sửa trực tiếp trong file này:
+- [ ] Bỏ luồng truyền RTCM qua LoRa.
+- [ ] Bỏ phụ thuộc Heltec LoRa nếu phần cứng thực tế dùng ESP32U/ESP32 dev board không có LoRa.
+- [ ] Không dùng Wi-Fi router/AP trong chế độ thực địa.
+- [ ] Không dùng MQTT/NTRIP trong luồng chính ngoài thực địa.
+- [ ] Đọc RTCM3 nhị phân trực tiếp từ UM980/UM982 Base qua UART.
+- [ ] Kiểm tra frame RTCM3 bằng preamble, length và CRC24Q trước khi gửi.
+- [ ] Chia một RTCM frame thành nhiều packet ESP-NOW v1 tối đa 250 byte.
+- [ ] Gửi unicast ESP-NOW Long Range tới MAC cố định của Rover.
+- [ ] Cùng dùng channel cố định với Rover.
+- [ ] Có health log qua Serial USB để debug tại hiện trường.
 
-- Thiết lập chân UART kết nối với module GNSS (`RX_GNSS`, `TX_GNSS`)
-- Thiết lập chân kết nối với module 4G (nếu sử dụng) (`TX_TO_MODEM_RX`, `RX_TO_MODEM_TX`, `MODEM_DC_PIN`, `MODEM_DTR_PIN`)
-- Thông tin mạng WiFi (nếu sử dụng) (`SSID`, `Password`)
-- Thông tin mạng 4G (`APN`, `User`, `Pass`) nếu sử dụng modem 4G
-- Cấu hình kết nối MQTT (`Server`, `Port`, `User`, `Pass`, `Topics`)
-- Cấu hình tài khoản NTRIP (`NTRIP_MODE`, `NTRIP_CASTER_IP`, `NTRIP_CASTER_PORT`, `NTRIP_MOUNTPOINT`, `NTRIP_AUTH`(base64))
-- Cấu hình kiểm tra sức khoẻ định kỳ (`HEALTH_INTERVAL`)
+## Kiến trúc đích
+
+### Vai trò của Base
+
+Base không nhận correction từ NTRIP caster nữa. Base là trạm phát correction cục bộ:
+
+1. UM980/UM982 được cấu hình ở chế độ Base.
+2. UM980/UM982 xuất RTCM ra UART.
+3. ESP32 đọc byte stream RTCM từ UART.
+4. ESP32 tách từng RTCM3 frame hoàn chỉnh.
+5. ESP32 kiểm tra CRC24Q.
+6. ESP32 chia frame thành fragment theo protocol chung với Rover.
+7. ESP32 gửi fragment bằng ESP-NOW LR tới Rover.
+
+### ESP-NOW field mode
+
+- ESP32 Base chạy `WIFI_STA`.
+- Không gọi `WiFi.begin()` trong chế độ thực địa.
+- Wi-Fi radio vẫn phải bật vì ESP-NOW chạy trên Wi-Fi driver của ESP32.
+- Base và Rover phải cùng `ESPNOW_WIFI_CHANNEL`.
+- Mặc định dùng ESP-NOW LR 250 Kbps để ưu tiên tầm xa.
+- Base gửi unicast tới `ESPNOW_ROVER_MAC`.
+- Giai đoạn đầu dùng MAC cấu hình tĩnh, chưa triển khai broadcast discovery/pairing động.
+- Có thể bật mã hóa PMK/LMK sau khi Base/Rover đã chạy ổn định.
+
+### Vì sao không dùng LoRa nữa
+
+- RTCM là luồng nhị phân thời gian thực, thường có burst nhiều frame liên tiếp.
+- LoRa băng thông thấp, thời gian truyền dài, dễ làm correction bị trễ.
+- ESP-NOW LR trên ESP32 cho throughput cao hơn và phù hợp hơn cho link Base ↔ Rover khoảng cách gần/trung bình ngoài thực địa.
+- Dùng ESP32U giúp tận dụng anten ngoài cho Wi-Fi/ESP-NOW.
+
+## Cấu hình cần có
+
+Các cấu hình dự kiến đặt trong `include/Prog_Config.h`:
+
+```cpp
+inline constexpr int RX_GNSS = 16; // UM980/982 TX -> ESP32 RX
+inline constexpr int TX_GNSS = 17; // UM980/982 RX -> ESP32 TX
+inline constexpr uint32_t GNSS_BAUD = 115200;
+
+inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
+inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
+
+// MAC STA của Rover, lấy từ log Serial của firmware Rover.
+inline constexpr uint8_t ESPNOW_ROVER_MAC[6] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
+inline constexpr uint8_t ESPNOW_PMK[16] = {0};
+inline constexpr uint8_t ESPNOW_LMK[16] = {0};
+```
+
+Cần xác nhận lại chân UART thực tế của PCB Base. Repo cũ đang dùng cấu hình Heltec V4 với `RX_GNSS = 41`, `TX_GNSS = 42`; nếu chuyển sang ESP32U/ESP32 dev board thì nhiều khả năng sẽ dùng GPIO16/GPIO17 giống Rover.
+
+## Giao thức RTCM qua ESP-NOW
+
+Protocol phải giống với firmware Rover.
+
+### Giới hạn
+
+- ESP-NOW v1 tối đa 250 byte mỗi packet.
+- Header protocol dài 16 byte.
+- Payload mỗi fragment tối đa 234 byte.
+- Một RTCM3 frame tối đa 1029 byte.
+- Một RTCM frame tối đa cần 5 fragment.
+- Số nguyên nhiều byte trên wire dùng little-endian.
+
+### Header
+
+```cpp
+#pragma pack(push, 1)
+struct RtcmEspNowHeader {
+    uint16_t magic;            // 0x5452; wire little-endian là 0x52, 0x54 ("RT")
+    uint8_t  version;          // 1
+    uint8_t  packetType;       // 1 = RTCM_DATA
+    uint16_t streamId;         // Tạo mới khi Base khởi động
+    uint32_t frameSequence;    // Tăng 1 sau mỗi RTCM frame
+    uint16_t frameLength;      // Tổng độ dài RTCM frame: 6..1029 byte
+    uint8_t  fragmentIndex;    // 0..fragmentCount-1
+    uint8_t  fragmentCount;    // 1..5
+    uint16_t payloadLength;    // 1..234 byte
+};
+#pragma pack(pop)
+```
+
+Độ dài packet gửi thực tế:
+
+```text
+sizeof(RtcmEspNowHeader) + payloadLength
+```
+
+Không gửi đủ 250 byte nếu fragment cuối không dùng hết payload.
+
+### Quy tắc phía Base
+
+1. Tìm preamble RTCM3 `0xD3`.
+2. Đọc length 10 bit trong RTCM header.
+3. Đọc đủ `3 + payloadLength + 3` byte.
+4. Kiểm tra CRC24Q.
+5. Tính `fragmentCount = ceil(frameLength / 234)`.
+6. Gửi fragment theo thứ tự tăng dần.
+7. Chỉ gửi fragment kế tiếp sau khi send callback của fragment trước trả về.
+8. Nếu send callback lỗi, retry ngắn; nếu vẫn lỗi thì bỏ frame hiện tại.
+9. Tăng `frameSequence` sau mỗi frame, kể cả frame bị bỏ.
+
+## Những điểm cần sửa trong code hiện tại
+
+### 1. Thay `RTCM_Receiver`
+
+File hiện tại:
+
+```text
+src/functions/RTCM_Receiver.cpp
+```
+
+đang dùng `String` và `Serial1.readString()`. Cách này không phù hợp với RTCM nhị phân. Ngoài ra file này còn ghi debug bằng `Serial1.println()`, tức ghi ngược vào UART của UM980/982, cần bỏ hoàn toàn.
+
+Thay bằng module mới:
+
+```text
+include/functions/Rtcm_Frame_Reader.h
+src/functions/Rtcm_Frame_Reader.cpp
+```
+
+Trách nhiệm:
+
+- đọc từng byte từ `Serial1`;
+- tìm preamble `0xD3`;
+- đọc length;
+- gom đủ frame;
+- kiểm tra CRC24Q;
+- trả về buffer `uint8_t frame[1029]` và `frameLength`.
+
+### 2. Thay LoRa sender bằng ESP-NOW sender
+
+Loại bỏ luồng:
+
+```text
+src/hardware/Lora_handler.cpp
+include/hardware/Lora_handler.h
+taskLora()
+```
+
+Thêm module:
+
+```text
+include/hardware/BaseEspnow_sender.h
+src/hardware/BaseEspnow_sender.cpp
+```
+
+Trách nhiệm:
+
+- cấu hình `WiFi.mode(WIFI_STA)`;
+- tắt sleep;
+- đặt protocol `WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR`;
+- đặt channel cố định;
+- `esp_now_init()`;
+- add peer là `ESPNOW_ROVER_MAC`;
+- đặt LR PHY rate 250 Kbps;
+- chia RTCM frame thành fragment và gửi bằng `esp_now_send()`;
+- ghi counter: frame gửi thành công, fragment lỗi, send timeout.
+
+### 3. Rút gọn `main.cpp`
+
+Luồng chính mới:
+
+```text
+setup()
+  Serial.begin()
+  Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS)
+  setupEspNowBase()
+  tạo task đọc/gửi RTCM
+  tạo task health log
+
+taskRtcm()
+  nếu đọc được RTCM frame hợp lệ
+    baseEspNowSendRtcmFrame(frame, length)
+
+loop()
+  delay ngắn hoặc xử lý retry ESP-NOW nếu cần
+```
+
+Không cần `setupMQTT()`, `connectMQTT()`, `setupNTRIP()` hoặc task LoRa trong field mode.
+
+### 4. Dọn `platformio.ini`
+
+Repo hiện có nhiều environment cho Wi-Fi/4G/Heltec/LoRa. Kiến trúc mới nên còn một environment chính:
+
+```ini
+[platformio]
+default_envs = esp32u_base_espnow
+
+[env:esp32u_base_espnow]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+build_flags =
+    -std=gnu++17
+    -DCONNECT_USING_WIFI=1
+    -DCONNECT_USING_4G=0
+    -DFIRMWARE_ROLE_BASE=1
+```
+
+Sau khi chuyển xong có thể bỏ:
+
+- thư viện Heltec LoRa;
+- board variant Heltec nếu không dùng phần cứng Heltec nữa;
+- mock LoRa test cũ;
+- TinyGSM nếu không dùng 4G.
+
+## Cấu hình UM980/UM982 Base
+
+Repo Base cần quyết định cách cấu hình UM980/UM982:
+
+### Phương án A: cấu hình thủ công
+
+UM980/UM982 được cấu hình bằng công cụ ngoài để xuất RTCM ra UART. ESP32 chỉ đọc RTCM và gửi ESP-NOW.
+
+Ưu điểm:
+
+- firmware ESP32 đơn giản;
+- ít rủi ro gửi sai lệnh cấu hình GNSS.
+
+Nhược điểm:
+
+- triển khai hàng loạt khó hơn;
+- khi mất cấu hình GNSS phải cấu hình lại thủ công.
+
+### Phương án B: ESP32 gửi lệnh cấu hình UM980/982 lúc boot
+
+ESP32 gửi lệnh cấu hình Base mode, RTCM output, baud, saveconfig.
+
+Ưu điểm:
+
+- tự động hóa tốt;
+- phù hợp sản phẩm hoàn chỉnh.
+
+Nhược điểm:
+
+- cần xác nhận đầy đủ command set UM980/UM982;
+- cần cơ chế tránh ghi cấu hình sai khi chưa có tọa độ cố định/survey-in.
+
+Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP-NOW link trước. Sau khi link ổn định mới thêm module cấu hình UM980/982.
+
+## Checklist triển khai
+
+1. [ ] Chốt phần cứng Base: ESP32U hay Heltec V4.
+2. [ ] Chốt GPIO UART nối UM980/UM982.
+3. [ ] Chốt `ESPNOW_WIFI_CHANNEL`.
+4. [ ] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
+5. [ ] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
+6. [ ] Thêm `Rtcm_Frame_Reader` đọc RTCM3 nhị phân từ UART.
+7. [ ] Thêm `BaseEspnow_sender`.
+8. [ ] Sửa `main.cpp` bỏ LoRa/NTRIP/MQTT khỏi field mode.
+9. [ ] Dọn `platformio.ini`.
+10. [ ] Build firmware `esp32u_base_espnow`.
+11. [ ] Test Base đọc được RTCM từ UM980/982.
+12. [ ] Test Base gửi ESP-NOW tới Rover cùng channel.
+13. [ ] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
+
+## Log mong đợi sau khi hoàn thiện
+
+```text
+[BASE][GNSS] UART1 baud=115200 RX=16 TX=17
+[WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW
+[WIFI] Local STA MAC: XX:XX:XX:XX:XX:XX
+[WIFI] ESP-NOW fixed channel: 6
+[BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
+[BASE][SETUP] Khoi dong hoan tat
+[BASE][HEALTH] rtcm_valid=..., frames_sent=..., fragments_sent=..., send_fail=...
+```
+
+## Lỗi thường gặp cần tránh
+
+| Lỗi | Cách tránh |
+|---|---|
+| Dùng `String` cho RTCM | Dùng buffer `uint8_t`, frame length rõ ràng |
+| Ghi debug vào `Serial1` | Chỉ log ra `Serial` USB |
+| Base/Rover khác channel | Cấu hình cùng `ESPNOW_WIFI_CHANNEL` |
+| Gửi broadcast RTCM | Dùng unicast tới MAC Rover |
+| Gửi frame RTCM sai CRC | Kiểm tra CRC24Q trước khi chia fragment |
+| Fragment cuối gửi dư byte | Gửi đúng `sizeof(header) + payloadLength` |
+| Router Wi-Fi làm đổi channel | Field mode không kết nối router/AP |
+
+## Kết luận
+
+Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay LoRa sender bằng ESP-NOW sender và thay cách đọc RTCM kiểu `String` bằng parser RTCM3 nhị phân đúng chuẩn. Sau khi Base gửi đúng protocol, Rover hiện tại có thể nhận, reassembly và ghi RTCM vào UM980/982 để đạt RTK.
