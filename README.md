@@ -121,6 +121,98 @@ sizeof(RtcmEspNowHeader) + payloadLength
 
 Không gửi đủ 250 byte nếu fragment cuối không dùng hết payload.
 
+### Bố cục mỗi packet/fragment trên wire
+
+Mỗi fragment là một packet ESP-NOW độc lập, gồm header 16 byte rồi đến đúng số byte payload của fragment đó:
+
+```text
+Byte 0..1    magic             0x5452 (trên wire little-endian: 52 54)
+Byte 2       version           1
+Byte 3       packetType        1 = RTCM_DATA
+Byte 4..5    streamId          giống nhau trong một phiên chạy của Base
+Byte 6..9    frameSequence     giống nhau cho mọi fragment thuộc cùng RTCM frame
+Byte 10..11  frameLength       tổng số byte của RTCM frame gốc
+Byte 12      fragmentIndex     chỉ số fragment, bắt đầu từ 0
+Byte 13      fragmentCount     tổng số fragment của RTCM frame
+Byte 14..15  payloadLength     số byte RTCM nằm trong fragment hiện tại
+Byte 16..    payload           một đoạn liên tục của RTCM frame gốc
+```
+
+Các trường `streamId`, `frameSequence`, `frameLength` và `fragmentCount` không đổi giữa các fragment của cùng một frame. Chỉ `fragmentIndex`, `payloadLength` và phần `payload` thay đổi.
+
+### Thuật toán chia RTCM frame hiện tại
+
+Với RTCM frame dài `L` byte:
+
+```text
+fragmentCount = ceil(L / 234)
+
+Với mỗi fragment i từ 0 đến fragmentCount - 1:
+    offset        = i * 234
+    payloadLength = min(234, L - offset)
+    payload       = frame[offset .. offset + payloadLength - 1]
+    packetLength  = 16 + payloadLength
+```
+
+Phạm vi dữ liệu mà từng fragment chứa:
+
+| Fragment hiển thị | `fragmentIndex` | Byte lấy từ RTCM frame | Payload tối đa | Packet ESP-NOW tối đa |
+|---|---:|---:|---:|---:|
+| Fragment 1 | 0 | `0..233` | 234 byte | 250 byte |
+| Fragment 2 | 1 | `234..467` | 234 byte | 250 byte |
+| Fragment 3 | 2 | `468..701` | 234 byte | 250 byte |
+| Fragment 4 | 3 | `702..935` | 234 byte | 250 byte |
+| Fragment 5 | 4 | `936..L-1` | tối đa 93 byte vì `L <= 1029` | tối đa 109 byte |
+
+Số fragment được chọn theo độ dài frame:
+
+| Độ dài RTCM frame | Số fragment |
+|---:|---:|
+| `6..234` byte | 1 |
+| `235..468` byte | 2 |
+| `469..702` byte | 3 |
+| `703..936` byte | 4 |
+| `937..1029` byte | 5 |
+
+Ví dụ frame RTCM hiện đang quan sát dài 27 byte chỉ tạo một fragment:
+
+```text
+fragmentIndex = 0
+fragmentCount = 1
+frameLength   = 27
+payloadLength = 27
+packetLength  = 16 + 27 = 43 byte
+payload       = toàn bộ 27 byte RTCM, từ D3 đến hết CRC24Q
+```
+
+Ví dụ frame dài 500 byte được tách như sau:
+
+```text
+Fragment 1: index=0/3, RTCM byte 0..233,   payloadLength=234, packetLength=250
+Fragment 2: index=1/3, RTCM byte 234..467, payloadLength=234, packetLength=250
+Fragment 3: index=2/3, RTCM byte 468..499, payloadLength=32,  packetLength=48
+```
+
+Trong code, `fragmentIndex` bắt đầu từ 0. Log lỗi lại hiển thị `fragmentIndex + 1`, vì vậy dòng `fragment 1/3` trong log tương ứng với `fragmentIndex=0` trên wire.
+
+### ACK, timeout và retry hiện tại
+
+Base đang gửi theo kiểu **stop-and-wait cho từng fragment**:
+
+1. Base gọi `esp_now_send()` unicast tới MAC STA của Rover.
+2. Nếu API trả lỗi ngay, lần gửi đó thất bại, Base chờ 5 ms rồi retry.
+3. Nếu API nhận packet, Base chờ send callback tối đa `ESPNOW_SEND_TIMEOUT_MS = 250 ms`.
+4. Callback trả `ESP_NOW_SEND_SUCCESS`: fragment được tính là gửi thành công và Base mới chuyển sang fragment kế tiếp.
+5. Callback trả failure: tăng `send_fail`, chờ 5 ms rồi retry cùng fragment.
+6. Không có callback trong 250 ms: tăng `send_timeout`, chờ 5 ms rồi retry cùng fragment.
+7. `ESPNOW_SEND_RETRY_COUNT = 2` nghĩa là một lần gửi đầu cộng hai lần retry, tối đa 3 attempt cho mỗi fragment.
+8. Nếu cả 3 attempt đều thất bại, Base bỏ toàn bộ frame hiện tại, không gửi các fragment còn lại, tăng `frames_dropped` và chuyển sang `frameSequence` kế tiếp.
+9. Chỉ khi tất cả fragment đều nhận callback success thì Base tăng `frames_sent`.
+
+Send callback hiện tại chỉ là xác nhận trạng thái gửi ở lớp ESP-NOW/Wi-Fi của Base. Protocol **chưa có ACK ứng dụng do Rover gửi ngược lại**, nên callback success chưa xác nhận rằng Rover đã nhận đủ mọi fragment, reassembly đúng frame hoặc đã ghi RTCM vào UART GNSS. Hiện cũng chưa có ACK theo toàn frame, NACK fragment thiếu hay cơ chế gửi lại nguyên frame.
+
+Nếu callback bị timeout nhưng Rover thực tế đã nhận packet, lần retry có thể tạo fragment trùng. Vì vậy phía Rover cần nhận diện fragment bằng bộ khóa `streamId + frameSequence + fragmentIndex` và không nối lặp payload trùng vào frame.
+
 ### Quy tắc phía Base
 
 1. Tìm preamble RTCM3 `0xD3`.
@@ -363,3 +455,4 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã bổ sung đo tốc độ thực theo mỗi chu kỳ health 30 giây: `uart_Bps` (byte UART/giây), `rtcm_fps` (frame RTCM hợp lệ/giây), `send_fps` (frame gửi thành công/giây) và `delivery` (tỷ lệ frame gửi thành công trong chu kỳ).
 - Đã tắt `DEBUG_GNSS_UART_RAW_DUMP` sau khi xác nhận UART2 nhận đúng dữ liệu để tránh in HEX từng byte làm nghẽn Serial; vẫn giữ `DEBUG_RTCM_HEX_DUMP` để xem đầy đủ từng frame RTCM. Bộ đếm `uart_raw_bytes` vẫn hoạt động khi raw dump tắt.
 - Đã build thành công firmware sau khi thêm thống kê tốc độ. PlatformIO báo RAM 44,600/327,680 bytes (13.6%), Flash 736,965/1,310,720 bytes (56.2%).
+- Đã cập nhật tài liệu thuật toán chia RTCM frame thành từng fragment, byte-range/payload/packet length của từng fragment, ví dụ frame 27 byte và 500 byte, cùng logic stop-and-wait, callback, timeout 250 ms và tối đa 3 attempt hiện tại. Đã ghi rõ send callback chưa phải ACK ứng dụng từ Rover.
