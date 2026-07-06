@@ -15,7 +15,7 @@ inline constexpr uint32_t GNSS_BAUD = 115200;
 inline constexpr int MUTEX_TIMEOUT_MS = 1500;
 inline constexpr unsigned long HEALTH_INTERVAL = 30000;
 inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = false;
-inline constexpr bool DEBUG_RTCM_HEX_DUMP = true;
+inline constexpr bool DEBUG_RTCM_HEX_DUMP = false;
 inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
 
 // ESP-NOW Base field-mode configuration.
