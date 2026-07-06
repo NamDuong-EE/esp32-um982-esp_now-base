@@ -66,19 +66,17 @@ inline constexpr int NTRIP_MODE = 1; // 1: Chỉ gửi GGA khi có yêu cầu; 2
 #if RTCM_COMMUNICATION_PROTOCOL == TCP_IP
 inline constexpr char NTRIP_CASTER_IP[] = "aitogy.com.vn";
 inline constexpr uint16_t NTRIP_CASTER_PORT = 2101;
-#elif RTCM_COMMUNICATION_PROTOCOL == LORA_SERIAL
-#define NTRIP_LORA_SERIAL_CONFIG
 #endif
 
-#ifndef PROGRAM_TEST
+#ifdef PROGRAM_TEST
+inline constexpr char NTRIP_MOUNTPOINT[] = "/test";
+inline constexpr char NTRIP_AUTH[] = "YWl0b2d5OmFpdG9neQ==";
+inline constexpr char NTRIP_AUTH_BASE_STATION[] = "12345";
+#else
 inline constexpr char NTRIP_MOUNTPOINT[] = "/humga";
 // Base64 của "trung:12345"
 inline constexpr char NTRIP_AUTH[] = "dHJ1bmc6MTIzNDU=";
-inline constexpr char NTRIP_AUTH_SERVER[] = "12345";
-#else
-inline constexpr char NTRIP_MOUNTPOINT[] = "/test";
-inline constexpr char NTRIP_AUTH[] = "YWl0b2d5OmFpdG9neQ==";
-inline constexpr char NTRIP_AUTH_SERVER[] = "12345";
+inline constexpr char NTRIP_AUTH_BASE_STATION[] = "12345";
 #endif
 
 // ================ CẤU HÌNH MQTT =================

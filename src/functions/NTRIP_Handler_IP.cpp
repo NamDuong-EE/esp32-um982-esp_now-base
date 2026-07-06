@@ -3,7 +3,6 @@
 
 #include "functions/NTRIP_Handler_IP.h"
 #include "Prog_Config.h"
-#include "functions/RTCM_Receiver.h"
 
 // ================= BIẾN TOÀN CỤC =================
 static bool isIcyOk = false;
@@ -22,6 +21,8 @@ TinyGsmClient ntripClient(modem);
 #endif
 
 extern String latestRtcm;
+extern SemaphoreHandle_t rtcmBufferMutex;
+extern SemaphoreHandle_t tcpStreamMutex;
 
 // ================= ĐỊNH NGHĨA HÀM =================
 
@@ -43,7 +44,8 @@ int connectNTRIP() {
     delay(1000); // Đợi một chút để đảm bảo kết nối ổn định
     Serial.println("[NTRIP] Da ket noi TCP! Dang gui Header...");
     
-    String request = "SOURCE " + String(NTRIP_AUTH_SERVER) + " " + String(NTRIP_MOUNTPOINT) + "\r\n"
+    sendRequest:
+    String request = "SOURCE " + String(NTRIP_AUTH_BASE_STATION) + " " + String(NTRIP_MOUNTPOINT) + " \r\n"
           + "Source-Agent: NTRIP NtripServerCMD/1.0\r\n\r\n";
     ntripClient.print(request);
 
@@ -68,7 +70,10 @@ int connectNTRIP() {
         }
       }
     }
-    Serial.println("[NTRIP] Khong doc duoc phan hoi tu Caster...");
+    if (!isIcyOk) {
+      Serial.println("[NTRIP] Khong nhan duoc ICY OK tu Caster!");
+    }
+    // goto sendRequest; // Thử gửi lại request nếu không nhận được phản hồi
   } else {
     Serial.println("[NTRIP] Loi ket noi TCP socket!");
     return -1;
@@ -76,7 +81,7 @@ int connectNTRIP() {
   return 0;
 }
 
-int loopNTRIP() {
+int loopNTRIP(String& rtcmData) {
   // không sử dụng tài nguyên chung, không cần mutex
   int returnCode = NTRIP_MODE; // returnCode = NTRIP_MODE + ntripClient.available() * 4
   // 1. Quản lý mất kết nối
@@ -91,15 +96,19 @@ int loopNTRIP() {
 
   // 2. Xử lý sau khi kết nối thành công
   if (isIcyOk) {
-    latestRtcm = receiveRtcmFromGnss(); // Nhận dữ liệu RTCM từ UM980
     // 3. Đẩy RTCM lên Caster nếu có dữ liệu
-    if (ntripClient.available() && !latestRtcm.isEmpty()) {
-      ntripClient.print(latestRtcm); // Gửi dữ liệu RTCM lên Caster
+    if (!rtcmData.isEmpty()) {
+      ntripClient.print(rtcmData); // Gửi dữ liệu RTCM lên Caster
       #if PROGRAM_DEBUG
       Serial.println("[NTRIP TASK] Da gui du lieu RTCM len Caster!");
       #endif
       returnCode += 4;
     }
+    #if PROGRAM_DEBUG
+    else {
+      Serial.println("[NTRIP TASK] Khong co du lieu RTCM de gui len Caster.");
+    }
+    #endif
   }
   return returnCode;
 }
