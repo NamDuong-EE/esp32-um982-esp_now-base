@@ -11,11 +11,18 @@ struct BaseEspnowStats {
     uint32_t fragmentsSent = 0;
     uint32_t sendFailures = 0;
     uint32_t sendTimeouts = 0;
+    uint32_t frameRetries = 0;
+    uint32_t frameAckTimeouts = 0;
+    uint32_t ackPacketsReceived = 0;
+    uint32_t ackPacketsInvalid = 0;
+    uint32_t frameDeadlineDrops = 0;
+    uint32_t lastFrameSendMs = 0;
+    uint32_t maxFrameSendMs = 0;
 };
 
 bool setupEspNowBase();
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length);
-const BaseEspnowStats& getBaseEspnowStats();
+BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
 
 #endif // BASE_ESPNOW_SENDER_H

@@ -46,7 +46,7 @@ trong phiên bản thử nghiệm hiện tại base sẽ không nhật correctio
 
 ## Đánh giá năng lực tải của kiến trúc hiện tại
 
-Kết luận review ngày 2026-07-06: kiến trúc hiện tại **đủ băng thông trung bình cho luồng RTCM 1 Hz đang thử nghiệm**, nhưng **chưa tối ưu an toàn cho burst đầy đủ nhiều loại RTCM từ UM980/UM982** và chưa thể xác nhận end-to-end nếu chưa review firmware Rover.
+Kết luận sau tối ưu ngày 2026-07-06: kiến trúc hiện tại đủ băng thông cho RTCM 1 Hz, đã tách UART reader khỏi ESP-NOW sender, có buffer chống burst, correction-age policy và ACK ứng dụng từ Rover. UART vẫn giữ 115200 và ESP-NOW vẫn giữ LR 250 Kbps theo chủ đích; chưa tăng tốc khi chưa có số đo phần cứng chứng minh cần thiết.
 
 ### Ngân sách băng thông
 
@@ -59,29 +59,22 @@ Kết luận review ngày 2026-07-06: kiến trúc hiện tại **đủ băng th
 
 Với dữ liệu đã quan sát trước đó chỉ khoảng 35 byte/s và frame 27 byte, tải hiện tại rất thấp so với cả UART và ESP-NOW. Khi bật đồng thời `1074/1084/1094/1124` thì UM980/UM982 có thể phát nhiều frame liên tiếp trong cùng epoch; lúc này khả năng chịu burst quan trọng hơn tốc độ trung bình.
 
-### Các điểm chưa tối ưu
+### Các tối ưu đã triển khai
 
-1. **Task đọc UART cũng trực tiếp chờ gửi ESP-NOW.** Sau khi parser nhận một frame, `taskRtcm` dừng đọc UART trong toàn bộ thời gian chia fragment, chờ callback và retry. Không có reader task và sender task độc lập, cũng không có queue frame ở giữa.
-2. **RX buffer UART mặc định chỉ 256 byte.** Arduino-ESP32 2.0.17 đang dùng `_rxBufferSize(256)`. Ở 115200 baud, 256 byte tương đương khoảng 22 ms dữ liệu khi đường truyền đầy. Một fragment timeout ba attempt có thể chặn khoảng `3 x (250 + 5) = 765 ms`, nên burst mới có thể tràn buffer trước khi task quay lại đọc.
-3. **Không có chỉ báo overflow UART.** `uart_raw_bytes` chỉ đếm byte parser đã lấy khỏi buffer, không đếm byte đã mất trước đó. `uart_available=0` cũng không chứng minh không từng overflow.
-4. **Không có giới hạn tuổi correction hoặc chính sách bỏ backlog.** Nếu ESP-NOW chậm/retry, firmware có thể tiếp tục gửi frame cũ thay vì ưu tiên correction mới nhất. Với RTK, correction mới thường có giá trị hơn backlog đã trễ.
-5. **Callback retry chưa gắn với attempt cụ thể.** Hai cờ dùng chung `sendCallbackReceived` và `lastSendSucceeded` không mang attempt ID. Callback đến muộn của attempt đã timeout có khả năng bị hiểu nhầm là callback của lần retry đang chạy.
-6. **Chưa có ACK ứng dụng từ Rover.** `ESP_NOW_SEND_SUCCESS` chỉ xác nhận mức MAC. Base chưa biết Rover đã nhận đủ fragment, loại fragment trùng, kiểm tra lại CRC24Q, ghép frame và ghi thành công vào UART GNSS hay chưa.
-7. **Thiếu thống kê theo RTCM message type và end-to-end latency.** Health log hiện chưa cho biết `1006`, `1074`, `1084`, `1094`, `1124` có đến đúng chu kỳ hay không và correction mất bao lâu từ Base tới UART Rover.
+1. RX buffer `Serial1` tăng từ mặc định 256 byte lên 4096 byte trước khi gọi `begin()`.
+2. `RTCM Reader` priority 4 chỉ đọc UART, parse và đưa frame vào queue; `RTCM Sender` priority 3 độc lập gửi ESP-NOW.
+3. Queue chứa 8 RTCM frame. Khi đầy, firmware bỏ frame cũ nhất để giữ correction mới; frame chờ quá 1000 ms bị tính `stale_drop` và không gửi.
+4. Mỗi frame mang timestamp nội bộ `receivedAtMs`; timestamp không đưa lên wire, không ghi Flash và phép trừ `uint32_t` an toàn khi `millis()` wrap.
+5. Send callback dùng FreeRTOS semaphore. Mỗi lần gửi nguyên frame có deadline 1000 ms, ACK timeout 300 ms và tối đa một lần retry nguyên frame.
+6. Rover gửi ACK 12 byte theo `streamId + frameSequence` chỉ sau khi ghép đủ fragment, CRC24Q đúng và `Serial1.write()` chấp nhận đủ frame. Nếu ACK mất, Rover ACK lại sequence trùng mà không ghi RTCM lần hai.
+7. Base thống kê cố định `1005`, `1006`, `1074`, `1084`, `1094`, `1124`, `1230` và `other`, gồm count và age; không dùng `String`, map hay cấp phát động.
+8. Health log có queue depth/high-water, queue/stale drop, queue age, ACK, retry, deadline, send duration và free heap.
 
-### Thứ tự tối ưu đề xuất
+### Phần chủ động chưa thay đổi
 
-1. Tăng `Serial1` RX buffer lên tối thiểu 4096 byte bằng `Serial1.setRxBufferSize(4096)` trước `Serial1.begin()`.
-2. Tách pipeline thành UART reader/parser task và ESP-NOW sender task, nối bằng queue hoặc buffer pool có kích thước hữu hạn.
-3. Gắn timestamp lúc nhận frame, đo queue delay/send duration và bỏ correction đã quá tuổi thay vì gửi backlog cũ.
-4. Thay hai cờ callback bằng task notification/semaphore và cơ chế chống callback muộn bị ghép nhầm attempt.
-5. Thêm ACK ứng dụng theo frame từ Rover, hoặc tối thiểu telemetry Rover gồm complete/missing/duplicate/CRC error/UART write fail.
-6. Thống kê RTCM message ID và khoảng thời gian nhận từng loại để xác nhận UM980/UM982 xuất đủ correction.
-7. Chỉ tăng UART lên 230400/460800 hoặc đổi ESP-NOW khỏi LR 250 Kbps sau khi đo cho thấy tải 1 Hz thực sự chạm trần; ưu tiên sửa pipeline và buffer trước.
-
-Firmware Base hiện đã tắt `DEBUG_GNSS_UART_RAW_DUMP` và `DEBUG_RTCM_HEX_DUMP`, phù hợp cho đo throughput. Log một dòng cho mỗi frame vẫn còn nhưng không phải nút thắt chính ở tải 1 Hz.
-
-Repo này không chứa firmware Rover, nên review hiện tại chưa xác nhận được phần reassembly, timeout frame, chống duplicate, CRC sau ghép và tốc độ ghi RTCM vào UART Rover.
+- Giữ `GNSS_BAUD = 115200` và ESP-NOW LR 250 Kbps. Chỉ cân nhắc 230400/460800 hoặc LR 500 Kbps sau khi log thực tế cho thấy tải 1 Hz chạm trần.
+- `uart_raw_bytes` đếm byte đã đọc nhưng driver chưa cung cấp counter overflow trực tiếp; cần đối chiếu CRC error, message ID age và queue metrics trong thử nghiệm phần cứng.
+- ACK xác nhận frame đã được Rover chấp nhận vào UART TX buffer, không xác nhận chip UM980/UM982 đã sử dụng correction; trạng thái RTK vẫn phải kiểm tra trên GNSS Rover.
 
 
 ## Cấu hình cần có
@@ -93,13 +86,16 @@ inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
 inline constexpr int RX_GNSS = 16; // UM980/982 TX2 -> ESP32 RX GPIO16
 inline constexpr int TX_GNSS = 17; // UM980/982 RX2 <- ESP32 TX GPIO17
 inline constexpr uint32_t GNSS_BAUD = 115200;
+inline constexpr size_t GNSS_RX_BUFFER_SIZE = 4096;
+inline constexpr size_t RTCM_FRAME_QUEUE_LENGTH = 8;
+inline constexpr uint32_t RTCM_MAX_QUEUE_AGE_MS = 1000;
 
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
 inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
 
 // MAC STA của Rover, lấy từ log Serial của firmware Rover.
 inline constexpr uint8_t ESPNOW_ROVER_MAC[6] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    0x58, 0x2A, 0xBD, 0x71, 0xE4, 0xF0
 };
 
 inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
@@ -108,7 +104,12 @@ inline constexpr uint8_t ESPNOW_LMK[16] = {0};
 
 inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = false;
 inline constexpr bool DEBUG_RTCM_HEX_DUMP = false;
+inline constexpr bool DEBUG_RTCM_FRAME_LOG = false;
 inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
+
+inline constexpr uint32_t ESPNOW_FRAME_SEND_DEADLINE_MS = 1000;
+inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
+inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
 ```
 
 Base hiện chọn dùng cổng UART2 của UM980/UM982:
@@ -236,21 +237,26 @@ Trong code, `fragmentIndex` bắt đầu từ 0. Log lỗi lại hiển thị `f
 
 ### ACK, timeout và retry hiện tại
 
-Base đang gửi theo kiểu **stop-and-wait cho từng fragment**:
+Base dùng hai lớp xác nhận:
 
-1. Base gọi `esp_now_send()` unicast tới MAC STA của Rover.
-2. Nếu API trả lỗi ngay, lần gửi đó thất bại, Base chờ 5 ms rồi retry.
-3. Nếu API nhận packet, Base chờ send callback tối đa `ESPNOW_SEND_TIMEOUT_MS = 250 ms`.
-4. Callback trả `ESP_NOW_SEND_SUCCESS`: fragment được tính là gửi thành công và Base mới chuyển sang fragment kế tiếp.
-5. Callback trả failure: tăng `send_fail`, chờ 5 ms rồi retry cùng fragment.
-6. Không có callback trong 250 ms: tăng `send_timeout`, chờ 5 ms rồi retry cùng fragment.
-7. `ESPNOW_SEND_RETRY_COUNT = 2` nghĩa là một lần gửi đầu cộng hai lần retry, tối đa 3 attempt cho mỗi fragment.
-8. Nếu cả 3 attempt đều thất bại, Base bỏ toàn bộ frame hiện tại, không gửi các fragment còn lại, tăng `frames_dropped` và chuyển sang `frameSequence` kế tiếp.
-9. Chỉ khi tất cả fragment đều nhận callback success thì Base tăng `frames_sent`.
+1. **MAC callback theo fragment:** Base gửi stop-and-wait, chỉ gửi fragment kế tiếp sau callback fragment hiện tại. Callback failure được retry tối đa theo `ESPNOW_SEND_RETRY_COUNT`; callback timeout dừng attempt hiện tại để tránh chờ vô hạn.
+2. **ACK ứng dụng theo frame:** Sau khi gửi các fragment, Base chờ ACK Rover tối đa 300 ms. Rover chỉ tạo ACK sau reassembly, CRC24Q và UART write thành công.
 
-Send callback hiện tại chỉ là xác nhận trạng thái gửi ở lớp ESP-NOW/Wi-Fi của Base. Protocol **chưa có ACK ứng dụng do Rover gửi ngược lại**, nên callback success chưa xác nhận rằng Rover đã nhận đủ mọi fragment, reassembly đúng frame hoặc đã ghi RTCM vào UART GNSS. Hiện cũng chưa có ACK theo toàn frame, NACK fragment thiếu hay cơ chế gửi lại nguyên frame.
+ACK có bố cục cố định 12 byte:
 
-Nếu callback bị timeout nhưng Rover thực tế đã nhận packet, lần retry có thể tạo fragment trùng. Vì vậy phía Rover cần nhận diện fragment bằng bộ khóa `streamId + frameSequence + fragmentIndex` và không nối lặp payload trùng vào frame.
+```cpp
+struct RtcmEspNowAck {
+    uint16_t magic;          // 0x5452
+    uint8_t  version;        // 1
+    uint8_t  packetType;     // 2 = FRAME_ACK
+    uint16_t streamId;
+    uint32_t frameSequence;
+    uint8_t  status;         // 1 = WRITTEN
+    uint8_t  reserved;
+};
+```
+
+Mỗi attempt gửi nguyên frame có deadline 1000 ms. Nếu thiếu ACK, Base retry nguyên frame một lần với cùng `streamId + frameSequence`. Rover nhận sequence đã hoàn thành sẽ ACK lại từ fragment đầu nhưng không ghi lặp RTCM vào UART. Chỉ ACK hợp lệ mới tăng `frames_acked`; hết retry mà không có ACK mới tăng `frames_dropped` và chuyển sequence.
 
 ### Quy tắc phía Base
 
@@ -261,8 +267,8 @@ Nếu callback bị timeout nhưng Rover thực tế đã nhận packet, lần r
 5. Tính `fragmentCount = ceil(frameLength / 234)`.
 6. Gửi fragment theo thứ tự tăng dần.
 7. Chỉ gửi fragment kế tiếp sau khi send callback của fragment trước trả về.
-8. Nếu send callback lỗi, retry ngắn; nếu vẫn lỗi thì bỏ frame hiện tại.
-9. Tăng `frameSequence` sau mỗi frame, kể cả frame bị bỏ.
+8. Chờ ACK ứng dụng từ Rover sau khi gửi đủ frame; nếu thiếu ACK thì retry nguyên frame một lần.
+9. Tăng `frameSequence` sau khi frame được ACK hoặc bị bỏ sau toàn bộ retry.
 
 ## Cách nạp firmware vào ESP32 Base
 
@@ -368,7 +374,8 @@ Khi UM980/UM982 Base bắt đầu xuất RTCM hợp lệ qua UART, log sẽ có:
 [BASE][GNSS] RTCM frame valid, length=...
 [BASE][GNSS][RTCM_HEX] valid length=...
 [BASE][GNSS][RTCM_HEX] 0000: D3 ...
-[BASE][HEALTH] period_ms=30000 uart_Bps=... rtcm_fps=... send_fps=... delivery=...% ...
+[BASE][HEALTH] period_ms=30000 uart_Bps=... rtcm_fps=... acked_fps=... delivery=...% queue=... queue_hwm=... queue_drop=... stale_drop=... ack_rx=...
+[BASE][RTCM_TYPES] 1005=...(age=...) 1006=...(age=...) 1074=...(age=...) 1084=...(age=...) 1094=...(age=...) 1124=...(age=...) 1230=...(age=...) other=...(age=...)
 ```
 
 Đổi `DEBUG_GNSS_UART_RAW_DUMP = true` khi cần in mọi byte thô ESP32 đọc được từ `Serial1`. Chế độ này mặc định tắt vì lượng log HEX lớn có thể làm chậm luồng đọc/gửi RTCM; dùng `uart_raw_bytes` và `uart_Bps` trong health log để kiểm tra UART khi raw dump đang tắt.
@@ -455,7 +462,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 [WIFI] ESP-NOW fixed channel: 6
 [BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
 [BASE][SETUP] Khoi dong hoan tat
-[BASE][HEALTH] rtcm_valid=..., frames_sent=..., fragments_sent=..., send_fail=...
+[BASE][HEALTH] rtcm_valid=..., frames_acked=..., fragments_sent=..., ack_timeout=..., queue_drop=..., stale_drop=...
 ```
 
 ## Lỗi thường gặp cần tránh
@@ -497,3 +504,5 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã cập nhật tài liệu thuật toán chia RTCM frame thành từng fragment, byte-range/payload/packet length của từng fragment, ví dụ frame 27 byte và 500 byte, cùng logic stop-and-wait, callback, timeout 250 ms và tối đa 3 attempt hiện tại. Đã ghi rõ send callback chưa phải ACK ứng dụng từ Rover.
 - Đã review năng lực tải toàn pipeline Base. Kết luận băng thông trung bình đủ cho RTCM 1 Hz hiện tại nhưng kiến trúc chưa chịu burst/retry an toàn vì reader và sender chạy nối tiếp, RX buffer UART mặc định 256 byte, chưa có queue, correction-age policy, ACK ứng dụng và telemetry Rover. Đã ghi thứ tự tối ưu đề xuất vào README.
 - Đã build xác nhận cấu hình hiện tại với cả hai HEX dump đều tắt: PlatformIO thành công, RAM 44.600/327.680 byte (13,6%), Flash 736.709/1.310.720 byte (56,2%).
+- Đã triển khai tối ưu pipeline theo mục 1-6: RX buffer 4096 byte, reader/sender task độc lập, queue 8 frame, timestamp và stale-drop 1000 ms, callback semaphore, frame deadline/retry, ACK ứng dụng Base/Rover và thống kê RTCM message ID. Giữ nguyên UART 115200 và ESP-NOW LR 250 Kbps theo yêu cầu.
+- Đã build thành công firmware Base tối ưu: RAM tĩnh 44.784/327.680 byte (13,7%), Flash 739.941/1.310.720 byte (56,5%). Heap runtime của queue/stack được giám sát bằng trường `free_heap` trong health log.
