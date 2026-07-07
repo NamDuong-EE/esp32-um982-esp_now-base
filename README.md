@@ -6,20 +6,8 @@ Repo này tập trung xây dựng Firmware cho Base dùng mạch ESP32 kết n�
 UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ──> ESP32 Rover ── UART ──> UM980/982 Rover
 ```
 
-## Mục tiêu chuyển đổi
 
-- [ ] Bỏ luồng truyền RTCM qua LoRa.
-- [ ] Bỏ phụ thuộc Heltec LoRa nếu phần cứng thực tế dùng ESP32U/ESP32 dev board không có LoRa.
-- [ ] Không dùng Wi-Fi router/AP trong chế độ thực địa.
-- [ ] Không dùng MQTT/NTRIP trong luồng chính ngoài thực địa.
-- [ ] Đọc RTCM3 nhị phân trực tiếp từ UM980/UM982 Base qua UART.
-- [ ] Kiểm tra frame RTCM3 bằng preamble, length và CRC24Q trước khi gửi.
-- [ ] Chia một RTCM frame thành nhiều packet ESP-NOW v1 tối đa 250 byte.
-- [ ] Gửi unicast ESP-NOW Long Range tới MAC cố định của Rover.
-- [ ] Cùng dùng channel cố định với Rover.
-- [ ] Có health log qua Serial USB để debug tại hiện trường.
-
-## Kiến trúc đích
+## muc tiêu
 
 ### Vai trò của Base
 
@@ -46,7 +34,7 @@ trong phiên bản thử nghiệm hiện tại base sẽ không nhật correctio
 
 ## Đánh giá năng lực tải của kiến trúc hiện tại
 
-Kết luận sau tối ưu ngày 2026-07-06: kiến trúc hiện tại đủ băng thông cho RTCM 1 Hz, đã tách UART reader khỏi ESP-NOW sender, có buffer chống burst, correction-age policy và ACK ứng dụng từ Rover. UART vẫn giữ 115200 và ESP-NOW vẫn giữ LR 250 Kbps theo chủ đích; chưa tăng tốc khi chưa có số đo phần cứng chứng minh cần thiết.
+Kết luận sau tối ưu ngày 2026-07-06: kiến trúc hiện tại đủ khả năng gửi gói tin RTCM tốc độ khá cao  ~3 gói tín/s, đã tách UART reader khỏi ESP-NOW sender, có buffer chống burst, correction-age policy và ACK ứng dụng từ Rover. UART vẫn giữ 115200 và ESP-NOW vẫn giữ băng thông giao thức LR ở 250 Kbps.
 
 ### Ngân sách băng thông
 
@@ -439,9 +427,9 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 
 ## Checklist triển khai
 
-1. [ ] Chốt phần cứng Base: ESP32U hay Heltec V4.
+1. [x] phần cứng Base: ESP32U 
 2. [x] Chốt GPIO UART nối UM980/UM982: dùng UM980 UART2 `TX2/RX2`, nối `TX2 -> GPIO16`, `RX2 -> GPIO17`, chung GND.
-3. [ ] Chốt `ESPNOW_WIFI_CHANNEL`.
+3. [x] Chốt `ESPNOW_WIFI_CHANNEL`.
 4. [x] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
 5. [x] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
 6. [x] Thêm `Rtcm_Frame_Reader` đọc RTCM3 nhị phân từ UART.
@@ -449,9 +437,9 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 8. [x] Sửa `main.cpp` bỏ LoRa/NTRIP/MQTT khỏi field mode.
 9. [x] Dọn `platformio.ini`.
 10. [x] Build firmware `esp32u_base_espnow`.
-11. [ ] Test Base đọc được RTCM từ UM980/982.
-12. [ ] Test Base gửi ESP-NOW tới Rover cùng channel.
-13. [ ] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
+11. [x] Test Base đọc được RTCM từ UM980/982.
+12. [x] Test Base gửi ESP-NOW tới Rover cùng channel.
+13. [x] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
 
 ## Log mong đợi sau khi hoàn thiện
 
