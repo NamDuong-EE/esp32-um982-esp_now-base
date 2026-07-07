@@ -52,6 +52,25 @@ bool roverMacConfigured()
     return false;
 }
 
+bool configureMaxTxPower()
+{
+    if (!WiFi.setTxPower(WIFI_POWER_19_5dBm)) {
+        Serial.println("[BASE][WIFI][ERROR] Khong set duoc TX power 19.5 dBm");
+        return false;
+    }
+
+    int8_t actualPower = 0;
+    const esp_err_t result = esp_wifi_get_max_tx_power(&actualPower);
+    if (result == ESP_OK) {
+        Serial.printf("[BASE][WIFI] TX power fixed raw=%d dBm=%.2f\n",
+                      actualPower,
+                      actualPower / 4.0f);
+    } else {
+        Serial.printf("[BASE][WIFI][WARN] Khong doc duoc TX power: %d\n", result);
+    }
+    return true;
+}
+
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void onDataSent(const wifi_tx_info_t*, esp_now_send_status_t status)
 #else
@@ -175,6 +194,9 @@ bool setupEspNowBase()
     WiFi.mode(WIFI_STA);
     WiFi.disconnect(false, true);
     delay(50);
+    if (!configureMaxTxPower()) {
+        return false;
+    }
 
     esp_wifi_set_ps(WIFI_PS_NONE);
 

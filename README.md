@@ -506,3 +506,5 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã build xác nhận cấu hình hiện tại với cả hai HEX dump đều tắt: PlatformIO thành công, RAM 44.600/327.680 byte (13,6%), Flash 736.709/1.310.720 byte (56,2%).
 - Đã triển khai tối ưu pipeline theo mục 1-6: RX buffer 4096 byte, reader/sender task độc lập, queue 8 frame, timestamp và stale-drop 1000 ms, callback semaphore, frame deadline/retry, ACK ứng dụng Base/Rover và thống kê RTCM message ID. Giữ nguyên UART 115200 và ESP-NOW LR 250 Kbps theo yêu cầu.
 - Đã build thành công firmware Base tối ưu: RAM tĩnh 44.784/327.680 byte (13,7%), Flash 739.941/1.310.720 byte (56,5%). Heap runtime của queue/stack được giám sát bằng trường `free_heap` trong health log.
+- Đã set cứng công suất phát WiFi/ESP-NOW của Base bằng `WiFi.setTxPower(WIFI_POWER_19_5dBm)` sau khi bật STA radio. Firmware đọc lại `esp_wifi_get_max_tx_power()` và in log `[BASE][WIFI] TX power fixed raw=... dBm=...` để xác nhận runtime.
+- Đã build xác nhận sau khi set TX power 19.5 dBm: `esp32u_base_espnow` SUCCESS, RAM 44.784/327.680 byte (13,7%), Flash 740.497/1.310.720 byte (56,5%).
