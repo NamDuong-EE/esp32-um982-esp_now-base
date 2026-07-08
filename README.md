@@ -11,7 +11,7 @@ UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ─
 
 ### Vai trò của Base
 
-trong phiên bản thử nghiệm hiện tại base sẽ không nhật correction từ NTRIP caster. Hiện tại đang tập trung phát triển và test khả năng phát và nhận gói tin giữ base và rover:
+Trong phiên bản thử nghiệm hiện tại base sẽ không nhận correction từ NTRIP caster và đang bỏ qua việc cập nhật trạng thái lên MQTT. Hiện tại đang tập trung phát triển và test khả năng phát và nhận gói tin giữ base và rover:
 
 1. UM980/UM982 được cấu hình ở chế độ Base.
 2. UM980/UM982 xuất RTCM ra UART.
