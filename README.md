@@ -29,8 +29,97 @@ Trong phiên bản thử nghiệm hiện tại base sẽ không nhận correctio
 - Base và Rover phải cùng `ESPNOW_WIFI_CHANNEL`.
 - Mặc định dùng ESP-NOW LR 250 Kbps để ưu tiên tầm xa.
 - Base gửi unicast tới `ESPNOW_ROVER_MAC`.
-- Giai đoạn đầu dùng MAC cấu hình tĩnh, chưa triển khai broadcast discovery/pairing động.
+- Giai đoạn hiện tại dùng MAC cấu hình tĩnh. Kiến trúc pairing động đã chốt theo hướng broadcast discovery bằng nút vật lý, sau đó chuyển sang unicast.
 - Có thể bật mã hóa PMK/LMK sau khi Base/Rover đã chạy ổn định.
+
+### Kiến trúc broadcast discovery -> unicast
+
+Mục tiêu của tính năng pairing động là Base và Rover tự tìm MAC của nhau mà không bị lẫn với ESP32/ESP-NOW khác ở cùng khu vực. Discovery chỉ dùng trong giai đoạn ghép cặp, không dùng để gửi RTCM thường xuyên.
+
+Chính sách đã chốt: **pair theo nút vật lý**.
+
+#### Normal mode
+
+- Base đọc MAC Rover đã lưu trong NVS/Preferences và chỉ gửi RTCM unicast tới MAC đó.
+- Rover đọc MAC Base đã lưu trong NVS/Preferences và chỉ chấp nhận packet từ MAC đó.
+- Không gửi broadcast discovery khi đang chạy bình thường.
+- Packet runtime vẫn kiểm tra `magic`, `version`, `packetType`, `streamId/frameSequence` và sẽ bổ sung `network_id` trong header ESP-NOW wrapper để tránh lẫn nhiều bộ cùng channel.
+- RTCM gốc không bị sửa; `network_id` chỉ nằm trong header ESP-NOW wrapper, Rover bỏ header trước khi ghi RTCM xuống UART cho UM980/982.
+
+#### Pairing mode
+
+Pairing mode chỉ mở trong một cửa sổ ngắn, ví dụ 60 giây, khi người dùng bấm/giữ nút vật lý trên cả Base và Rover cần ghép.
+
+1. Người dùng bấm nút pairing trên Base để Base vào pairing mode.
+2. Người dùng bấm nút pairing trên đúng Rover muốn ghép. Các Rover khác không ở pairing mode sẽ không trả lời discovery.
+3. Base thêm broadcast peer `FF:FF:FF:FF:FF:FF` và gửi gói `PAIR_DISCOVERY` định kỳ, ví dụ 500 ms/lần.
+4. Rover chỉ xử lý discovery nếu đang ở pairing mode và gói hợp lệ.
+5. Rover trả lời unicast `PAIR_RESPONSE` về MAC của Base lấy từ callback ESP-NOW.
+6. Base nhận response hợp lệ đầu tiên, thêm Rover làm peer unicast, gửi `PAIR_CONFIRM`.
+7. Base lưu MAC Rover vào NVS/Preferences và thoát pairing mode.
+8. Rover chỉ lưu MAC Base sau khi nhận `PAIR_CONFIRM` hợp lệ, rồi thoát pairing mode.
+9. Từ thời điểm này Base và Rover dùng unicast cho RTCM/ACK; broadcast không còn dùng trong normal mode.
+
+#### Packet pairing đề xuất
+
+Các packet pairing không mang RTCM. Chúng là packet điều khiển riêng của protocol ESP-NOW:
+
+```text
+PAIR_DISCOVERY:
+    magic
+    version
+    packetType = PAIR_DISCOVERY
+    role       = BASE
+    network_id
+    base_device_id
+    base_nonce
+    pairing_window_ms
+    auth_tag
+
+PAIR_RESPONSE:
+    magic
+    version
+    packetType = PAIR_RESPONSE
+    role       = ROVER
+    network_id
+    rover_device_id
+    rover_nonce
+    base_nonce_echo
+    auth_tag
+
+PAIR_CONFIRM:
+    magic
+    version
+    packetType = PAIR_CONFIRM
+    role       = BASE
+    network_id
+    base_nonce
+    rover_nonce
+    auth_tag
+```
+
+`network_id` là ID dùng chung cho một hệ thống quan trắc. `auth_tag` nên được tạo từ `pairing_key` dùng chung giữa firmware Base/Rover, ví dụ HMAC hoặc một hàm xác thực nhẹ hơn nếu muốn giữ code nhỏ. Không nên chỉ dựa vào MAC vì thiết bị lạ vẫn có thể nghe broadcast.
+
+#### Pair nhiều rover với 1 base
+
+8/7/2026: hệ thống hiện tại đang ở giai đoạn thử nghiệm pairing 1 base - 1 rover, trong tương lại sẽ thử nghiệm tiếp pair 1 base - nhiều rover
+
+Ví dụ bật 1 Base và 5 Rover:
+
+- Nếu chỉ bấm pairing trên Base và 1 Rover mong muốn, chỉ Rover đó trả lời; Base pair với Rover đó.
+- Nếu cả 5 Rover đều bị đưa vào pairing mode cùng lúc, cả 5 có thể trả lời hợp lệ. Chính sách Base là nhận response hợp lệ đầu tiên, gửi confirm cho Rover đó và bỏ qua các Rover còn lại. Cách vận hành khuyến nghị là chỉ bấm pairing trên một Rover tại một thời điểm.
+- Rover đã pair sẽ không ghi đè MAC Base đang lưu nếu không bấm nút pairing/re-pair.
+- Base đã pair sẽ không ghi đè MAC Rover đang lưu nếu không bấm nút pairing/re-pair.
+
+#### Điều kiện để không lẫn thiết bị khác
+
+- Cùng channel mới thấy nhau, nhưng cùng channel chưa đủ để pair.
+- Chỉ thiết bị đang ở pairing mode mới trả lời discovery.
+- Packet phải đúng `magic`, `version`, `packetType`, `role`.
+- Packet phải đúng `network_id`.
+- Packet phải có `auth_tag` hợp lệ từ `pairing_key`.
+- Rover chỉ lưu Base sau `PAIR_CONFIRM`, không lưu ngay khi thấy discovery.
+- Sau pairing, runtime chỉ nhận packet từ MAC đã lưu và đúng `network_id`.
 
 ## Đánh giá năng lực tải của kiến trúc hiện tại
 
@@ -440,6 +529,10 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 11. [x] Test Base đọc được RTCM từ UM980/982.
 12. [x] Test Base gửi ESP-NOW tới Rover cùng channel.
 13. [x] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
+14. [x] Chốt kiến trúc pairing động: dùng nút vật lý trên Base/Rover, broadcast discovery chỉ trong pairing window, sau confirm chuyển sang unicast.
+15. [ ] Thiết kế/triển khai `network_id`, `pairing_key/auth_tag` và packet `PAIR_DISCOVERY`/`PAIR_RESPONSE`/`PAIR_CONFIRM`.
+16. [ ] Lưu MAC đã pair vào NVS/Preferences và thêm cơ chế re-pair bằng nút vật lý.
+17. [ ] Bổ sung kiểm tra `network_id` vào header ESP-NOW runtime để nhiều bộ Base/Rover cùng channel không lẫn nhau.
 
 ## Log mong đợi sau khi hoàn thiện
 
@@ -496,3 +589,7 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã build thành công firmware Base tối ưu: RAM tĩnh 44.784/327.680 byte (13,7%), Flash 739.941/1.310.720 byte (56,5%). Heap runtime của queue/stack được giám sát bằng trường `free_heap` trong health log.
 - Đã set cứng công suất phát WiFi/ESP-NOW của Base bằng `WiFi.setTxPower(WIFI_POWER_19_5dBm)` sau khi bật STA radio. Firmware đọc lại `esp_wifi_get_max_tx_power()` và in log `[BASE][WIFI] TX power fixed raw=... dBm=...` để xác nhận runtime.
 - Đã build xác nhận sau khi set TX power 19.5 dBm: `esp32u_base_espnow` SUCCESS, RAM 44.784/327.680 byte (13,7%), Flash 740.497/1.310.720 byte (56,5%).
+
+### 2026-07-08
+
+- Đã chốt kiến trúc broadcast discovery -> unicast cho pairing động: chỉ vào pairing mode khi bấm nút vật lý trên Base và Rover, Base broadcast `PAIR_DISCOVERY` trong cửa sổ ngắn, Rover đang pairing trả lời unicast, Base gửi `PAIR_CONFIRM`, hai bên lưu MAC vào NVS/Preferences rồi quay về unicast runtime. README đã ghi rõ cơ chế chống lẫn thiết bị khác bằng `network_id`, `pairing_key/auth_tag`, kiểm tra role/packet type và chỉ cho phép re-pair khi bấm nút.
