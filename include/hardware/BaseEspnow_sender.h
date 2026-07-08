@@ -18,9 +18,16 @@ struct BaseEspnowStats {
     uint32_t frameDeadlineDrops = 0;
     uint32_t lastFrameSendMs = 0;
     uint32_t maxFrameSendMs = 0;
+    uint32_t activeRoverCount = 0;
+    uint32_t storedRoverCount = 0;
+    uint32_t pairResponsesReceived = 0;
+    uint32_t pairConfirmsSent = 0;
+    uint32_t pairAuthFailures = 0;
+    bool pairingActive = false;
 };
 
 bool setupEspNowBase();
+void baseEspNowLoop();
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length);
 BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();

@@ -266,7 +266,8 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "rtcm_valid=%lu crc_error=%lu too_large=%lu frames_acked=%lu frames_dropped=%lu "
             "fragments_sent=%lu send_fail=%lu send_timeout=%lu frame_retry=%lu ack_timeout=%lu "
             "ack_rx=%lu ack_invalid=%lu frame_deadline=%lu task_send_ok=%lu task_send_fail=%lu "
-            "send_ms=%lu send_max_ms=%lu free_heap=%u\n",
+            "rovers=%lu stored_rovers=%lu pairing=%u pair_resp=%lu pair_confirm=%lu "
+            "pair_auth_fail=%lu send_ms=%lu send_max_ms=%lu free_heap=%u\n",
             static_cast<unsigned long>(periodMs),
             static_cast<double>(deltaRawBytes) / seconds,
             static_cast<double>(deltaRtcmValid) / seconds,
@@ -295,6 +296,12 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(espnow.frameDeadlineDrops),
             static_cast<unsigned long>(pipeline.rtcmSendOk),
             static_cast<unsigned long>(pipeline.rtcmSendFail),
+            static_cast<unsigned long>(espnow.activeRoverCount),
+            static_cast<unsigned long>(espnow.storedRoverCount),
+            espnow.pairingActive ? 1U : 0U,
+            static_cast<unsigned long>(espnow.pairResponsesReceived),
+            static_cast<unsigned long>(espnow.pairConfirmsSent),
+            static_cast<unsigned long>(espnow.pairAuthFailures),
             static_cast<unsigned long>(espnow.lastFrameSendMs),
             static_cast<unsigned long>(espnow.maxFrameSendMs),
             ESP.getFreeHeap());
@@ -403,5 +410,6 @@ void setup()
 
 void loop()
 {
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    baseEspNowLoop();
+    vTaskDelay(pdMS_TO_TICKS(20));
 }

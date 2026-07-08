@@ -28,8 +28,8 @@ Trong phiên bản thử nghiệm hiện tại base sẽ không nhận correctio
 - Wi-Fi radio vẫn phải bật vì ESP-NOW chạy trên Wi-Fi driver của ESP32.
 - Base và Rover phải cùng `ESPNOW_WIFI_CHANNEL`.
 - Mặc định dùng ESP-NOW LR 250 Kbps để ưu tiên tầm xa.
-- Base gửi unicast tới `ESPNOW_ROVER_MAC`.
-- Giai đoạn hiện tại dùng MAC cấu hình tĩnh. Kiến trúc pairing động đã chốt theo hướng broadcast discovery bằng nút vật lý, sau đó chuyển sang unicast.
+- Base gửi unicast tới các MAC Rover đã pair và lưu trong NVS/Preferences.
+- Không còn MAC Rover hard-code trong firmware. Nếu NVS chưa có Rover đã pair, Base vẫn khởi động ESP-NOW để chờ pairing nhưng chưa gửi RTCM runtime cho peer nào.
 - Có thể bật mã hóa PMK/LMK sau khi Base/Rover đã chạy ổn định.
 
 ### Kiến trúc broadcast discovery -> unicast
@@ -40,11 +40,11 @@ Chính sách đã chốt: **pair theo nút vật lý**.
 
 #### Normal mode
 
-- Base đọc MAC Rover đã lưu trong NVS/Preferences và chỉ gửi RTCM unicast tới MAC đó.
+- Base đọc danh sách MAC Rover đã lưu trong NVS/Preferences và chỉ gửi RTCM unicast tới các MAC đó. Bản hiện tại hỗ trợ tối đa 5 Rover đã pair.
 - Rover đọc MAC Base đã lưu trong NVS/Preferences và chỉ chấp nhận packet từ MAC đó.
 - Không gửi broadcast discovery khi đang chạy bình thường.
-- Packet runtime vẫn kiểm tra `magic`, `version`, `packetType`, `streamId/frameSequence` và sẽ bổ sung `network_id` trong header ESP-NOW wrapper để tránh lẫn nhiều bộ cùng channel.
-- RTCM gốc không bị sửa; `network_id` chỉ nằm trong header ESP-NOW wrapper, Rover bỏ header trước khi ghi RTCM xuống UART cho UM980/982.
+- Packet pairing dùng `network_id` và `auth_tag`. Packet runtime RTCM/ACK hiện vẫn giữ protocol v1: data header 16 byte, ACK 12 byte, chưa thêm `network_id` vào data/ACK để không phá pipeline đã test.
+- RTCM gốc không bị sửa; mọi header ESP-NOW wrapper đều bị Rover bỏ trước khi ghi RTCM xuống UART cho UM980/982.
 
 #### Pairing mode
 
@@ -102,7 +102,7 @@ PAIR_CONFIRM:
 
 #### Pair nhiều rover với 1 base
 
-8/7/2026: hệ thống hiện tại đang ở giai đoạn thử nghiệm pairing 1 base - 1 rover, trong tương lại sẽ thử nghiệm tiếp pair 1 base - nhiều rover
+8/7/2026: Base đã hỗ trợ lưu tối đa 5 Rover. Quy trình vận hành vẫn pair lần lượt từng cặp Base-Rover bằng nút vật lý; không đưa nhiều Rover vào pairing mode cùng lúc đẻ tránh chọn nhầm.
 
 Ví dụ bật 1 Base và 5 Rover:
 
@@ -119,7 +119,7 @@ Ví dụ bật 1 Base và 5 Rover:
 - Packet phải đúng `network_id`.
 - Packet phải có `auth_tag` hợp lệ từ `pairing_key`.
 - Rover chỉ lưu Base sau `PAIR_CONFIRM`, không lưu ngay khi thấy discovery.
-- Sau pairing, runtime chỉ nhận packet từ MAC đã lưu và đúng `network_id`.
+- Sau pairing, runtime chỉ nhận packet từ MAC đã lưu. `network_id` hiện dùng ở packet pairing; runtime data/ACK có thể nâng lên protocol v2 để thêm `network_id` sau khi pairing ổn định.
 
 ## Đánh giá năng lực tải của kiến trúc hiện tại
 
@@ -170,11 +170,6 @@ inline constexpr uint32_t RTCM_MAX_QUEUE_AGE_MS = 1000;
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
 inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
 
-// MAC STA của Rover, lấy từ log Serial của firmware Rover.
-inline constexpr uint8_t ESPNOW_ROVER_MAC[6] = {
-    0x58, 0x2A, 0xBD, 0x71, 0xE4, 0xF0
-};
-
 inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
 inline constexpr uint8_t ESPNOW_PMK[16] = {0};
 inline constexpr uint8_t ESPNOW_LMK[16] = {0};
@@ -187,6 +182,22 @@ inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
 inline constexpr uint32_t ESPNOW_FRAME_SEND_DEADLINE_MS = 1000;
 inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
 inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
+
+inline constexpr bool ESPNOW_PAIRING_ENABLED = true;
+inline constexpr int PAIRING_BUTTON_PIN = 0;
+inline constexpr bool PAIRING_BUTTON_ACTIVE_LOW = true;
+inline constexpr uint32_t PAIRING_BUTTON_HOLD_MS = 1500;
+inline constexpr uint32_t PAIRING_WINDOW_MS = 60000;
+inline constexpr uint32_t PAIR_DISCOVERY_INTERVAL_MS = 500;
+inline constexpr uint8_t ESPNOW_MAX_PAIRED_ROVERS = 5;
+inline constexpr uint32_t ESPNOW_NETWORK_ID = 0xA1700001UL;
+inline constexpr uint8_t ESPNOW_PAIRING_KEY[16] = {
+    0x41, 0x49, 0x54, 0x4F, 0x47, 0x59, 0x5F, 0x50,
+    0x41, 0x49, 0x52, 0x5F, 0x56, 0x30, 0x30, 0x31,
+};
+inline constexpr char ESPNOW_NVS_NAMESPACE[] = "espnow";
+inline constexpr char ESPNOW_NVS_ROVER_COUNT_KEY[] = "rover_count";
+inline constexpr char ESPNOW_NVS_ROVER_MAC_PREFIX[] = "rover";
 ```
 
 Base hiện chọn dùng cổng UART2 của UM980/UM982:
@@ -364,7 +375,7 @@ Firmware Base ESP-NOW nên được nạp bằng PlatformIO vì repo dùng `plat
   - `TX_GNSS = 17`;
   - dây nối `UM980 TX2 -> ESP32 GPIO16`, `UM980 RX2 -> ESP32 GPIO17`, `GND -> GND`;
   - `ESPNOW_WIFI_CHANNEL = 6`;
-  - `ESPNOW_ROVER_MAC = 58:2A:BD:71:E4:F0`.
+  - không cần điền MAC Rover trong code; MAC Rover sẽ được lưu vào NVS sau khi pairing.
 
 ### 2. Build kiểm tra trước khi nạp
 
@@ -519,7 +530,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 1. [x] phần cứng Base: ESP32U 
 2. [x] Chốt GPIO UART nối UM980/UM982: dùng UM980 UART2 `TX2/RX2`, nối `TX2 -> GPIO16`, `RX2 -> GPIO17`, chung GND.
 3. [x] Chốt `ESPNOW_WIFI_CHANNEL`.
-4. [x] Lấy MAC STA của Rover và điền `ESPNOW_ROVER_MAC`.
+4. [x] Bỏ cấu hình MAC Rover tĩnh; Base lấy MAC Rover từ pairing/NVS.
 5. [x] Thêm `RtcmEspNowProtocol` dùng chung với Rover.
 6. [x] Thêm `Rtcm_Frame_Reader` đọc RTCM3 nhị phân từ UART.
 7. [x] Thêm `BaseEspnow_sender`.
@@ -530,9 +541,10 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 12. [x] Test Base gửi ESP-NOW tới Rover cùng channel.
 13. [x] Test Rover nhận RTCM và UM980/982 Rover đạt RTK Float/Fixed.
 14. [x] Chốt kiến trúc pairing động: dùng nút vật lý trên Base/Rover, broadcast discovery chỉ trong pairing window, sau confirm chuyển sang unicast.
-15. [ ] Thiết kế/triển khai `network_id`, `pairing_key/auth_tag` và packet `PAIR_DISCOVERY`/`PAIR_RESPONSE`/`PAIR_CONFIRM`.
-16. [ ] Lưu MAC đã pair vào NVS/Preferences và thêm cơ chế re-pair bằng nút vật lý.
-17. [ ] Bổ sung kiểm tra `network_id` vào header ESP-NOW runtime để nhiều bộ Base/Rover cùng channel không lẫn nhau.
+15. [x] Thiết kế/triển khai `network_id`, `pairing_key/auth_tag` và packet `PAIR_DISCOVERY`/`PAIR_RESPONSE`/`PAIR_CONFIRM`.
+16. [x] Lưu MAC đã pair vào NVS/Preferences và thêm cơ chế re-pair bằng nút vật lý.
+17. [x] Base hỗ trợ danh sách tối đa 5 Rover đã pair và gửi RTCM multi-unicast lần lượt tới từng Rover.
+18. [ ] Bổ sung kiểm tra `network_id` vào header ESP-NOW runtime data/ACK nếu cần nâng protocol lên v2 sau khi pairing ổn định.
 
 ## Log mong đợi sau khi hoàn thiện
 
@@ -593,3 +605,8 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 ### 2026-07-08
 
 - Đã chốt kiến trúc broadcast discovery -> unicast cho pairing động: chỉ vào pairing mode khi bấm nút vật lý trên Base và Rover, Base broadcast `PAIR_DISCOVERY` trong cửa sổ ngắn, Rover đang pairing trả lời unicast, Base gửi `PAIR_CONFIRM`, hai bên lưu MAC vào NVS/Preferences rồi quay về unicast runtime. README đã ghi rõ cơ chế chống lẫn thiết bị khác bằng `network_id`, `pairing_key/auth_tag`, kiểm tra role/packet type và chỉ cho phép re-pair khi bấm nút.
+- Đã triển khai Base-side pairing động: Base giữ nút pairing để broadcast `PAIR_DISCOVERY`, nhận `PAIR_RESPONSE`, validate `network_id`/`auth_tag`/nonce, gửi `PAIR_CONFIRM`, lưu MAC Rover vào NVS namespace `espnow` và chuyển runtime sang unicast.
+- Đã mở rộng Base sang danh sách tối đa 5 Rover đã pair. Không còn `ESPNOW_ROVER_MAC` hard-code hay fallback MAC tĩnh; nếu NVS chưa có Rover, Base chờ pairing và chưa gửi RTCM runtime. Khi có nhiều Rover, Base gửi cùng RTCM frame multi-unicast lần lượt tới từng Rover và chờ ACK theo MAC từng Rover.
+- Đã bổ sung health log Base: `rovers`, `stored_rovers`, `pairing`, `pair_resp`, `pair_confirm`, `pair_auth_fail`.
+- Đã build xác nhận sau pairing Base-side: `esp32u_base_espnow` SUCCESS, RAM 44.984/327.680 byte (13,7%), Flash 749.521/1.310.720 byte (57,2%).
+- Đã xóa MAC Rover hard-code khỏi Base ngày 2026-07-08: không còn `ESPNOW_ROVER_MAC`, không còn fallback MAC tĩnh trong `BaseEspnow_sender`. Base chỉ lấy danh sách Rover từ NVS/Preferences do pairing ghi vào; nếu NVS rỗng thì Base chờ pairing và chưa gửi RTCM runtime. Build `esp32u_base_espnow` SUCCESS, RAM 44.984/327.680 byte (13,7%), Flash 749.409/1.310.720 byte (57,2%).

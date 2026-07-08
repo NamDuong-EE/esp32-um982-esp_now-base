@@ -27,11 +27,6 @@ inline constexpr uint32_t RTCM_MAX_QUEUE_AGE_MS = 1000;
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
 inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
 
-// Rover STA MAC: 58:2A:BD:71:E4:F0.
-inline constexpr uint8_t ESPNOW_ROVER_MAC[6] = {
-    0x58, 0x2A, 0xBD, 0x71, 0xE4, 0xF0
-};
-
 inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
 inline constexpr uint8_t ESPNOW_PMK[16] = {0};
 inline constexpr uint8_t ESPNOW_LMK[16] = {0};
@@ -41,5 +36,23 @@ inline constexpr uint8_t ESPNOW_SEND_RETRY_COUNT = 2;
 inline constexpr uint32_t ESPNOW_FRAME_SEND_DEADLINE_MS = 1000;
 inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
 inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
+
+// ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to
+// discover MAC addresses by broadcast, then switch back to unicast runtime.
+inline constexpr bool ESPNOW_PAIRING_ENABLED = true;
+inline constexpr int PAIRING_BUTTON_PIN = 0; // BOOT on many ESP32 boards; change for PCB.
+inline constexpr bool PAIRING_BUTTON_ACTIVE_LOW = true;
+inline constexpr uint32_t PAIRING_BUTTON_HOLD_MS = 1500;
+inline constexpr uint32_t PAIRING_WINDOW_MS = 60000;
+inline constexpr uint32_t PAIR_DISCOVERY_INTERVAL_MS = 500;
+inline constexpr uint8_t ESPNOW_MAX_PAIRED_ROVERS = 5;
+inline constexpr uint32_t ESPNOW_NETWORK_ID = 0xA1700001UL;
+inline constexpr uint8_t ESPNOW_PAIRING_KEY[16] = {
+    0x41, 0x49, 0x54, 0x4F, 0x47, 0x59, 0x5F, 0x50,
+    0x41, 0x49, 0x52, 0x5F, 0x56, 0x30, 0x30, 0x31,
+};
+inline constexpr char ESPNOW_NVS_NAMESPACE[] = "espnow";
+inline constexpr char ESPNOW_NVS_ROVER_COUNT_KEY[] = "rover_count";
+inline constexpr char ESPNOW_NVS_ROVER_MAC_PREFIX[] = "rover";
 
 #endif // PROG_CONFIG_H
