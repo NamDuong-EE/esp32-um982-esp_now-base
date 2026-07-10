@@ -545,6 +545,9 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 16. [x] Lưu MAC đã pair vào NVS/Preferences và thêm cơ chế re-pair bằng nút vật lý.
 17. [x] Base hỗ trợ danh sách tối đa 5 Rover đã pair và gửi RTCM multi-unicast lần lượt tới từng Rover.
 18. [ ] Bổ sung kiểm tra `network_id` vào header ESP-NOW runtime data/ACK nếu cần nâng protocol lên v2 sau khi pairing ổn định.
+19. [ ] kiểm tra khả năng kết nối với wifi/4g của esp32.
+20. [ ] thêm lại tính năng giao tiếp với server qua MQTT.
+21. [ ] thêm tính năng nhận trạng thái lat/lon/high từ rover rồi cập nhật trạng thái của rover qua MQTT
 
 ## Log mong đợi sau khi hoàn thiện
 
