@@ -15,11 +15,11 @@
 #endif
 
 #ifndef CONNECT_USING_WIFI
-#define CONNECT_USING_WIFI 0
+#define CONNECT_USING_WIFI 1
 #endif
 
 #ifndef CONNECT_USING_4G
-#define CONNECT_USING_4G 1
+#define CONNECT_USING_4G 0
 #endif
 
 #define TCP_IP 0

@@ -5,6 +5,38 @@
 #include <cstdint>
 #include "Top_Lvl_Config.h"
 
+#if __has_include("Network_Secrets.h")
+#include "Network_Secrets.h"
+#endif
+
+#ifndef BASE_WIFI_SSID
+#define BASE_WIFI_SSID ""
+#endif
+#ifndef BASE_WIFI_PASSWORD
+#define BASE_WIFI_PASSWORD ""
+#endif
+#ifndef BASE_MQTT_HOST
+#define BASE_MQTT_HOST ""
+#endif
+#ifndef BASE_MQTT_PORT
+#define BASE_MQTT_PORT 1883
+#endif
+#ifndef BASE_MQTT_USER
+#define BASE_MQTT_USER ""
+#endif
+#ifndef BASE_MQTT_PASSWORD
+#define BASE_MQTT_PASSWORD ""
+#endif
+#ifndef BASE_MODEM_APN
+#define BASE_MODEM_APN ""
+#endif
+#ifndef BASE_MODEM_GPRS_USER
+#define BASE_MODEM_GPRS_USER ""
+#endif
+#ifndef BASE_MODEM_GPRS_PASSWORD
+#define BASE_MODEM_GPRS_PASSWORD ""
+#endif
+
 // UART2 from UM980/UM982 Base to ESP32.
 inline constexpr int LED_PIN = 2;
 inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
@@ -22,6 +54,33 @@ inline constexpr bool DEBUG_RTCM_FRAME_LOG = false;
 inline constexpr uint8_t DEBUG_RTCM_HEX_BYTES_PER_LINE = 16;
 inline constexpr size_t RTCM_FRAME_QUEUE_LENGTH = 8;
 inline constexpr uint32_t RTCM_MAX_QUEUE_AGE_MS = 1000;
+
+// Internet and MQTT. Wi-Fi is used during development; 4G is selected by the
+// esp32u_base_4g_mqtt PlatformIO environment when the modem board is ready.
+inline constexpr char NETWORK_WIFI_SSID[] = BASE_WIFI_SSID;
+inline constexpr char NETWORK_WIFI_PASSWORD[] = BASE_WIFI_PASSWORD;
+inline constexpr char MQTT_HOST[] = BASE_MQTT_HOST;
+inline constexpr uint16_t MQTT_PORT = BASE_MQTT_PORT;
+inline constexpr char MQTT_USER[] = BASE_MQTT_USER;
+inline constexpr char MQTT_PASSWORD[] = BASE_MQTT_PASSWORD;
+inline constexpr char MQTT_TOPIC_STATUS[] = "aitogy/base/test/status";
+inline constexpr char MQTT_TOPIC_COMMAND[] = "aitogy/base/test/command";
+inline constexpr char MQTT_TOPIC_ROVER_LLH_PREFIX[] = "aitogy/base/rovers";
+inline constexpr uint32_t NETWORK_RECONNECT_INTERVAL_MS = 10000;
+inline constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
+inline constexpr uint32_t MQTT_LLH_RETRY_INTERVAL_MS = 1000;
+inline constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 30;
+inline constexpr uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 2;
+inline constexpr uint16_t MQTT_BUFFER_SIZE = 512;
+
+// SIM7600 defaults for the future 4G board. Confirm these pins against the PCB.
+inline constexpr int MODEM_RX_PIN = 26; // ESP32 RX <- modem TX.
+inline constexpr int MODEM_TX_PIN = 27; // ESP32 TX -> modem RX.
+inline constexpr uint32_t MODEM_BAUD = 115200;
+inline constexpr uint32_t MODEM_NETWORK_TIMEOUT_MS = 10000;
+inline constexpr char MODEM_APN[] = BASE_MODEM_APN;
+inline constexpr char MODEM_GPRS_USER[] = BASE_MODEM_GPRS_USER;
+inline constexpr char MODEM_GPRS_PASSWORD[] = BASE_MODEM_GPRS_PASSWORD;
 
 // ESP-NOW Base field-mode configuration.
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;

@@ -4,6 +4,7 @@
 
 #include "Prog_Config.h"
 #include "RtcmEspNowProtocol.h"
+#include "functions/NetworkMqttManager.h"
 #include "functions/Rtcm_Frame_Reader.h"
 #include "hardware/BaseEspnow_sender.h"
 
@@ -267,7 +268,8 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "fragments_sent=%lu send_fail=%lu send_timeout=%lu frame_retry=%lu ack_timeout=%lu "
             "ack_rx=%lu ack_invalid=%lu frame_deadline=%lu task_send_ok=%lu task_send_fail=%lu "
             "rovers=%lu stored_rovers=%lu pairing=%u pair_resp=%lu pair_confirm=%lu "
-            "pair_auth_fail=%lu send_ms=%lu send_max_ms=%lu free_heap=%u\n",
+            "pair_auth_fail=%lu llh_rx=%lu llh_invalid=%lu llh_unknown=%lu "
+            "send_ms=%lu send_max_ms=%lu free_heap=%u\n",
             static_cast<unsigned long>(periodMs),
             static_cast<double>(deltaRawBytes) / seconds,
             static_cast<double>(deltaRtcmValid) / seconds,
@@ -302,6 +304,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(espnow.pairResponsesReceived),
             static_cast<unsigned long>(espnow.pairConfirmsSent),
             static_cast<unsigned long>(espnow.pairAuthFailures),
+            static_cast<unsigned long>(espnow.llhStatusReceived),
+            static_cast<unsigned long>(espnow.llhStatusInvalid),
+            static_cast<unsigned long>(espnow.llhStatusUnknownSource),
             static_cast<unsigned long>(espnow.lastFrameSendMs),
             static_cast<unsigned long>(espnow.maxFrameSendMs),
             ESP.getFreeHeap());
@@ -326,11 +331,78 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
         }
         Serial.println();
 
+        const NetworkMqttStats network = getNetworkMqttStats();
+        Serial.printf(
+            "[BASE][NETWORK_HEALTH] transport=%s configured=%u internet=%u mqtt=%u "
+            "signal_dbm=%ld network_attempt=%lu mqtt_attempt=%lu mqtt_connect=%lu "
+            "mqtt_disconnect=%lu llh_published=%lu llh_publish_fail=%lu "
+            "llh_publish_age_ms=%lu\n",
+            networkTransportName(),
+            network.configured ? 1U : 0U,
+            network.internetConnected ? 1U : 0U,
+            network.mqttConnected ? 1U : 0U,
+            static_cast<long>(network.signalDbm),
+            static_cast<unsigned long>(network.networkAttempts),
+            static_cast<unsigned long>(network.mqttAttempts),
+            static_cast<unsigned long>(network.mqttConnects),
+            static_cast<unsigned long>(network.mqttDisconnects),
+            static_cast<unsigned long>(network.llhPublished),
+            static_cast<unsigned long>(network.llhPublishFailures),
+            static_cast<unsigned long>(network.lastLlhPublishedAtMs == 0
+                                           ? UINT32_MAX
+                                           : now - network.lastLlhPublishedAtMs));
+
         previousLogAt = now;
         previousRawBytes = rawBytes;
         previousRtcmValid = pipeline.rtcmValidFrames;
         previousFramesSent = espnow.framesSent;
         previousFramesDropped = espnow.framesDropped;
+    }
+}
+
+[[noreturn]] void networkMqttTask(void*)
+{
+    setupNetworkMqtt();
+    while (true) {
+        networkMqttLoop();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+[[noreturn]] void roverLlhLogTask(void*)
+{
+    uint32_t lastSequences[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    bool haveSequence[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        BaseRoverLlhStatus snapshots[ESPNOW_MAX_PAIRED_ROVERS] = {};
+        const size_t count = baseEspNowCopyLatestRoverLlh(
+            snapshots, ESPNOW_MAX_PAIRED_ROVERS);
+        for (size_t index = 0; index < count; ++index) {
+            const BaseRoverLlhStatus& status = snapshots[index];
+            if (!status.valid ||
+                (haveSequence[index] && lastSequences[index] == status.sequence)) {
+                continue;
+            }
+            haveSequence[index] = true;
+            lastSequences[index] = status.sequence;
+            const double latitude =
+                static_cast<double>(status.latitudeE7) /
+                RTCM_ESPNOW_LLH_COORDINATE_SCALE;
+            const double longitude =
+                static_cast<double>(status.longitudeE7) /
+                RTCM_ESPNOW_LLH_COORDINATE_SCALE;
+            const double heightM =
+                static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
+            Serial.printf(
+                "[BASE][ROVER_LLH] mac=%02X:%02X:%02X:%02X:%02X:%02X seq=%lu "
+                "lat=%.7f lon=%.7f height_m=%.3f age_ms=%lu\n",
+                status.mac[0], status.mac[1], status.mac[2],
+                status.mac[3], status.mac[4], status.mac[5],
+                static_cast<unsigned long>(status.sequence),
+                latitude, longitude, heightM,
+                static_cast<unsigned long>(millis() - status.receivedAtMs));
+        }
     }
 }
 
@@ -396,7 +468,9 @@ void setup()
     const bool tasksReady =
         createTask(taskRtcmReader, "RTCM Reader", 6144, 4, 1) &&
         createTask(taskRtcmSender, "RTCM Sender", 6144, 3, 1) &&
-        createTask(healthLogTask, "Health Task", 4096, 1, 1);
+        createTask(healthLogTask, "Health Task", 4096, 1, 1) &&
+        createTask(roverLlhLogTask, "Rover LLH", 4096, 1, 1) &&
+        createTask(networkMqttTask, "Network MQTT", 6144, 1, 0);
     if (!tasksReady) {
         delay(5000);
         ESP.restart();

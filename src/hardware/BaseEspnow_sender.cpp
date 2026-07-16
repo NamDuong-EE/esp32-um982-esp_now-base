@@ -23,9 +23,11 @@ struct RoverPeer {
 
 BaseEspnowStats stats;
 RoverPeer roverPeers[ESPNOW_MAX_PAIRED_ROVERS] = {};
+BaseRoverLlhStatus latestRoverLlh[ESPNOW_MAX_PAIRED_ROVERS] = {};
 size_t roverPeerCount = 0;
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE peerMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE llhMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE pairingMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t streamId = 0;
 uint32_t frameSequence = 0;
@@ -190,6 +192,21 @@ bool addRoverRuntimePeer(const uint8_t* mac, bool stored)
 
     updatePeerStats();
     return addEspNowPeer(mac, ESPNOW_ENCRYPTION_ENABLED);
+}
+
+bool findRoverPeerIndex(const uint8_t* mac, size_t& selectedIndex)
+{
+    bool found = false;
+    portENTER_CRITICAL(&peerMux);
+    for (size_t index = 0; index < roverPeerCount; ++index) {
+        if (macEquals(roverPeers[index].mac, mac)) {
+            selectedIndex = index;
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&peerMux);
+    return found;
 }
 
 size_t copyRoverPeers(RoverPeer* destination, size_t capacity)
@@ -370,6 +387,39 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
 
     if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_PAIR_RESPONSE) {
         queuePairResponse(sourceMac, data, length);
+        return;
+    }
+
+    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS) {
+        if (length != static_cast<int>(sizeof(RoverLlhStatusPacket))) {
+            incrementStat(&BaseEspnowStats::llhStatusInvalid);
+            return;
+        }
+        RoverLlhStatusPacket packet{};
+        std::memcpy(&packet, data, sizeof(packet));
+        if (!rtcmEspNowValidateRoverLlhStatus(packet, sizeof(packet))) {
+            incrementStat(&BaseEspnowStats::llhStatusInvalid);
+            return;
+        }
+
+        size_t roverIndex = 0;
+        if (!findRoverPeerIndex(sourceMac, roverIndex) ||
+            roverIndex >= ESPNOW_MAX_PAIRED_ROVERS) {
+            incrementStat(&BaseEspnowStats::llhStatusUnknownSource);
+            return;
+        }
+
+        portENTER_CRITICAL(&llhMux);
+        BaseRoverLlhStatus& latest = latestRoverLlh[roverIndex];
+        std::memcpy(latest.mac, sourceMac, sizeof(latest.mac));
+        latest.sequence = packet.sequence;
+        latest.latitudeE7 = packet.latitudeE7;
+        latest.longitudeE7 = packet.longitudeE7;
+        latest.heightMm = packet.heightMm;
+        latest.receivedAtMs = millis();
+        latest.valid = true;
+        portEXIT_CRITICAL(&llhMux);
+        incrementStat(&BaseEspnowStats::llhStatusReceived);
         return;
     }
 
@@ -784,7 +834,7 @@ bool setupEspNowBase()
 
     streamId = static_cast<uint16_t>(esp_random() & 0xFFFFU);
 
-    Serial.println("[WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW");
+    Serial.println("[WIFI] STA radio ready for ESP-NOW; Internet transport starts separately");
     Serial.print("[WIFI] Local STA MAC: ");
     Serial.println(WiFi.macAddress());
     Serial.printf("[WIFI] ESP-NOW fixed channel: %u\n", ESPNOW_WIFI_CHANNEL);
@@ -896,4 +946,21 @@ BaseEspnowStats getBaseEspnowStats()
 uint16_t getBaseEspNowStreamId()
 {
     return streamId;
+}
+
+size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
+                                    size_t capacity)
+{
+    if (destination == nullptr || capacity == 0) {
+        return 0;
+    }
+    portENTER_CRITICAL(&peerMux);
+    const size_t count = roverPeerCount < capacity ? roverPeerCount : capacity;
+    portEXIT_CRITICAL(&peerMux);
+    portENTER_CRITICAL(&llhMux);
+    for (size_t index = 0; index < count; ++index) {
+        destination[index] = latestRoverLlh[index];
+    }
+    portEXIT_CRITICAL(&llhMux);
+    return count;
 }

@@ -11,8 +11,11 @@ inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_FRAME_ACK = 2;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_DISCOVERY = 3;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_RESPONSE = 4;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_CONFIRM = 5;
+inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS = 6;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_BASE = 1;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_ROVER = 2;
+inline constexpr double RTCM_ESPNOW_LLH_COORDINATE_SCALE = 10000000.0;
+inline constexpr double RTCM_ESPNOW_LLH_HEIGHT_SCALE = 1000.0;
 inline constexpr uint8_t RTCM_ESPNOW_ACK_STATUS_WRITTEN = 1;
 inline constexpr size_t RTCM_ESPNOW_MAX_PACKET_SIZE = 250;
 inline constexpr size_t RTCM_ESPNOW_MAX_FRAME_LENGTH = 1029;
@@ -44,6 +47,14 @@ struct RtcmEspNowAck {
     uint32_t frameSequence;
     uint8_t status;
     uint8_t reserved;
+};
+
+struct RoverLlhStatusPacket {
+    RtcmEspNowCommonHeader common;
+    uint32_t sequence;
+    int32_t latitudeE7;
+    int32_t longitudeE7;
+    int32_t heightMm;
 };
 
 struct RtcmEspNowPairDiscovery {
@@ -82,6 +93,7 @@ struct RtcmEspNowPairConfirm {
 static_assert(sizeof(RtcmEspNowCommonHeader) == 4, "RTCM ESP-NOW common header must be 4 bytes");
 static_assert(sizeof(RtcmEspNowHeader) == 16, "RTCM ESP-NOW header must be 16 bytes");
 static_assert(sizeof(RtcmEspNowAck) == 12, "RTCM ESP-NOW ACK must be 12 bytes");
+static_assert(sizeof(RoverLlhStatusPacket) == 20, "ROVER_LLH_STATUS must be 20 bytes");
 static_assert(sizeof(RtcmEspNowPairDiscovery) == 28, "PAIR_DISCOVERY must be 28 bytes");
 static_assert(sizeof(RtcmEspNowPairResponse) == 28, "PAIR_RESPONSE must be 28 bytes");
 static_assert(sizeof(RtcmEspNowPairConfirm) == 24, "PAIR_CONFIRM must be 24 bytes");
@@ -160,6 +172,17 @@ inline bool rtcmEspNowValidatePairResponse(const RtcmEspNowPairResponse& packet,
            packet.networkId == expectedNetworkId &&
            packet.baseNonceEcho == expectedBaseNonce &&
            packet.authTag == rtcmEspNowPairingAuthTag(packet, pairingKey, pairingKeyLength);
+}
+
+inline bool rtcmEspNowValidateRoverLlhStatus(const RoverLlhStatusPacket& packet,
+                                             size_t receivedLength)
+{
+    return receivedLength == sizeof(RoverLlhStatusPacket) &&
+           packet.common.magic == RTCM_ESPNOW_MAGIC &&
+           packet.common.version == RTCM_ESPNOW_VERSION &&
+           packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS &&
+           packet.latitudeE7 >= -900000000 && packet.latitudeE7 <= 900000000 &&
+           packet.longitudeE7 >= -1800000000 && packet.longitudeE7 <= 1800000000;
 }
 
 #endif // RTCM_ESPNOW_PROTOCOL_H

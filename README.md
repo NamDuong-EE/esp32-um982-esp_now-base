@@ -11,7 +11,7 @@ UM980/982 Base ── UART RTCM ──> ESP32 Base ── ESP-NOW Long Range ─
 
 ### Vai trò của Base
 
-Trong phiên bản thử nghiệm hiện tại base sẽ không nhận correction từ NTRIP caster và đang bỏ qua việc cập nhật trạng thái lên MQTT. Hiện tại đang tập trung phát triển và test khả năng phát và nhận gói tin giữ base và rover:
+Trong phiên bản thử nghiệm hiện tại Base không nhận correction từ NTRIP caster. Base đã có transport Wi-Fi/4G để đưa LLH của từng Rover lên MQTT; RTCM vẫn đi trực tiếp tới Rover bằng ESP-NOW LR và không phụ thuộc Internet/MQTT:
 
 1. UM980/UM982 được cấu hình ở chế độ Base.
 2. UM980/UM982 xuất RTCM ra UART.
@@ -21,12 +21,29 @@ Trong phiên bản thử nghiệm hiện tại base sẽ không nhận correctio
 6. ESP32 chia frame thành fragment theo protocol chung với Rover.
 7. ESP32 gửi fragment bằng ESP-NOW LR tới Rover.
 
+### Telemetry LLH Rover -> Base -> MQTT
+
+- Packet runtime `ROVER_LLH_STATUS` type 6 co kich thuoc 20 byte, dung `int32_t`: latitude/longitude nhan `10^7`, height MSL doi tu met sang millimetre.
+- Chi Rover Normal gui truc tiep ve Base da pair, toi da 1 Hz. Relay va Rover con chua gui/chuyen tiep LLH trong giai doan nay.
+- Packet LLH khong retry. Neu TX manager Rover dang ban boi pairing hoac RTCM ACK thi bo luot hien tai; packet moi se thu lai sau mot giay.
+- Base chi chap nhan source MAC nam trong danh sach Rover da pair va validate length/magic/version/type/mien toa do.
+- Base giu mot snapshot moi nhat cho moi Rover trong RAM; packet moi ghi de packet cu. LLH khong duoc ghi vao NVS/flash.
+- Khi Base restart, snapshot RAM mat va Rover se gui lai. NVS van chi luu danh sach MAC da pair.
+- Base log snapshot moi va publish moi snapshot mot lan len topic MQTT rieng theo MAC Rover. Neu MQTT mat ket noi, Base khong tao backlog; sau khi reconnect chi snapshot moi nhat cua moi Rover duoc gui.
+
+```text
+[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=12 lat=21.0734567 lon=105.8123456 height_m=12.345 age_ms=20
+[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/582ABD71E4F0/llh seq=12 bytes=...
+```
+
 ### ESP-NOW field mode
 
 - ESP32 Base chạy `WIFI_STA`.
-- Không gọi `WiFi.begin()` trong chế độ thực địa.
+- Bản test hiện tại có thể gọi `WiFi.begin()` để kết nối router và MQTT; router bắt buộc ở cùng channel với ESP-NOW.
 - Wi-Fi radio vẫn phải bật vì ESP-NOW chạy trên Wi-Fi driver của ESP32.
 - Base và Rover phải cùng `ESPNOW_WIFI_CHANNEL`.
+- Khi dùng Wi-Fi Internet, router, Base và Rover đều phải ở channel `6`; firmware chỉ thử kết nối SSID trên channel này để tránh quét mạng làm đổi channel ESP-NOW.
+- Khi dùng 4G, modem có radio riêng nên ESP-NOW tiếp tục giữ channel `6` độc lập.
 - Mặc định dùng ESP-NOW LR 250 Kbps để ưu tiên tầm xa.
 - Base gửi unicast tới các MAC Rover đã pair và lưu trong NVS/Preferences.
 - Không còn MAC Rover hard-code trong firmware. Nếu NVS chưa có Rover đã pair, Base vẫn khởi động ESP-NOW để chờ pairing nhưng chưa gửi RTCM runtime cho peer nào.
@@ -358,6 +375,81 @@ Mỗi attempt gửi nguyên frame có deadline 1000 ms. Nếu thiếu ACK, Base 
 8. Chờ ACK ứng dụng từ Rover sau khi gửi đủ frame; nếu thiếu ACK thì retry nguyên frame một lần.
 9. Tăng `frameSequence` sau khi frame được ACK hoặc bị bỏ sau toàn bộ retry.
 
+## Kết nối Internet và MQTT
+
+Firmware hỗ trợ hai transport được chọn lúc build, không bật đồng thời:
+
+| Environment | Internet | Trạng thái sử dụng |
+|---|---|---|
+| `esp32u_base_espnow` | Wi-Fi | Mặc định để phát triển và test MQTT |
+| `esp32u_base_4g_mqtt` | SIM7600/4G | Dành cho mạch 4G sau khi hoàn thiện phần cứng |
+
+Network/MQTT chạy trong task riêng priority thấp trên core 0. `RTCM Reader` và `RTCM Sender` vẫn chạy độc lập với priority cao hơn; mất Wi-Fi, 4G hoặc MQTT không dừng ESP-NOW, pairing hay pipeline RTCM. Reconnect có giới hạn chu kỳ, MQTT không được dùng để vận chuyển RTCM trong bản này.
+
+### Cấu hình Wi-Fi/MQTT để test
+
+Sửa file local `include/Network_Secrets.h` (file này đã được `.gitignore`, không commit mật khẩu):
+
+```cpp
+#define BASE_WIFI_SSID "TEN_WIFI"
+#define BASE_WIFI_PASSWORD "MAT_KHAU_WIFI"
+
+#define BASE_MQTT_HOST "192.168.1.10"
+#define BASE_MQTT_PORT 1883
+#define BASE_MQTT_USER ""
+#define BASE_MQTT_PASSWORD ""
+```
+
+Mẫu cấu hình được lưu tại `include/Network_Secrets.example.h`. Router phải được đặt cố định channel `6`, trùng `ESPNOW_WIFI_CHANNEL` trên Base và Rover. Nếu router ở channel khác, firmware không đổi channel ESP-NOW để chạy theo router mà sẽ tiếp tục retry Wi-Fi trên channel 6.
+
+Build/nạp bản Wi-Fi test bằng environment mặc định:
+
+```powershell
+pio run -e esp32u_base_espnow
+pio run -e esp32u_base_espnow -t upload
+```
+
+MQTT test dùng các topic:
+
+| Topic | Hướng | Nội dung |
+|---|---|---|
+| `aitogy/base/test/status` | Base publish retained | `online`; LWT ghi `offline` |
+| `aitogy/base/rovers/<MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height và source age |
+| `aitogy/base/test/command` | Base subscribe | Chỉ log payload để test downlink, không tự động gửi lệnh xuống UM980 |
+
+Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/llh`:
+
+```json
+{"rover_mac":"58:2A:BD:71:E4:F0","sequence":12,"latitude":21.0734567,"longitude":105.8123456,"height_m":12.345,"source_age_ms":20}
+```
+
+Server có thể subscribe wildcard `aitogy/base/rovers/+/llh` để nhận LLH của tất cả Rover đã pair. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và LLH mới.
+
+Bản hiện tại dùng MQTT TCP port `1883` để thử nghiệm trong mạng tin cậy, chưa bật TLS. Khi dùng server thực tế qua Internet cần bổ sung TLS/xác thực chứng chỉ trước khi triển khai.
+
+### Cấu hình 4G dự kiến
+
+Environment `esp32u_base_4g_mqtt` dùng TinyGSM với modem SIM7600, UART2 ESP32 mặc định `RX=26`, `TX=27`, baud `115200`. Phải kiểm tra lại GPIO và mạch nguồn/PWRKEY theo PCB 4G trước khi nạp. Điền `BASE_MODEM_APN`, user/password APN và MQTT trong `Network_Secrets.h`, sau đó build:
+
+```powershell
+pio run -e esp32u_base_4g_mqtt
+```
+
+### Log kiểm tra
+
+Kết nối thành công sẽ có các log:
+
+```text
+[BASE][NETWORK] transport=wifi configured=yes
+[BASE][WIFI] Connecting SSID=... fixed_channel=6
+[BASE][WIFI] Connected IP=... channel=6 RSSI=... dBm
+[BASE][MQTT] Connected, rover_llh_filter=aitogy/base/rovers/+/llh
+[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/.../llh seq=... bytes=...
+[BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 llh_published=... ...
+```
+
+Nếu secrets còn trống, RTCM/ESP-NOW vẫn chạy bình thường và log báo `configured=no`.
+
 ## Cách nạp firmware vào ESP32 Base
 
 Firmware Base ESP-NOW nên được nạp bằng PlatformIO vì repo dùng `platformio.ini` và env chính `esp32u_base_espnow`.
@@ -449,10 +541,11 @@ Sau khi monitor mở, bấm `EN/RESET` trên ESP32 Base. Log mong đợi:
 ```text
 [BASE][GNSS] ESP32 Serial1 reading UM980 UART2 TX2/RX2, baud=115200 RX=16 TX=17
 [BASE][DEBUG] uart_raw_dump=on rtcm_hex_dump=on
-[WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW
+[WIFI] STA radio ready for ESP-NOW; Internet transport starts separately
 [WIFI] Local STA MAC: XX:XX:XX:XX:XX:XX
 [WIFI] ESP-NOW fixed channel: 6
 [BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
+[BASE][NETWORK] transport=wifi configured=...
 [BASE][SETUP] Khoi dong hoan tat
 ```
 
@@ -545,20 +638,26 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 16. [x] Lưu MAC đã pair vào NVS/Preferences và thêm cơ chế re-pair bằng nút vật lý.
 17. [x] Base hỗ trợ danh sách tối đa 5 Rover đã pair và gửi RTCM multi-unicast lần lượt tới từng Rover.
 18. [ ] Bổ sung kiểm tra `network_id` vào header ESP-NOW runtime data/ACK nếu cần nâng protocol lên v2 sau khi pairing ổn định.
-19. [ ] kiểm tra khả năng kết nối với wifi/4g của esp32.
-20. [ ] thêm lại tính năng giao tiếp với server qua MQTT.
-21. [ ] thêm tính năng nhận trạng thái lat/lon/high từ rover rồi cập nhật trạng thái của rover qua MQTT
+19. [x] Thêm transport Wi-Fi/4G chọn theo environment và task reconnect riêng không chặn RTCM/ESP-NOW.
+20. [x] Thêm MQTT test: status/LWT, downlink log và health counter.
+21. [ ] Điền credentials và kiểm tra Wi-Fi/MQTT với broker thật trong khi Rover vẫn nhận RTCM LR.
+22. [ ] Hoàn thiện mạch 4G, xác nhận GPIO/nguồn/PWRKEY/APN và kiểm tra environment `esp32u_base_4g_mqtt` trên SIM7600 thật.
+23. [x] Nhận LLH từ từng Rover, giữ snapshot mới nhất và publish lên topic MQTT phân theo MAC; không tạo backlog khi offline.
 
 ## Log mong đợi sau khi hoàn thiện
 
 ```text
 [BASE][GNSS] ESP32 Serial1 reading UM980 UART2 TX2/RX2, baud=115200 RX=16 TX=17
-[WIFI] Khong ket noi router/AP; chi dung STA radio cho ESP-NOW
+[WIFI] STA radio ready for ESP-NOW; Internet transport starts separately
 [WIFI] Local STA MAC: XX:XX:XX:XX:XX:XX
 [WIFI] ESP-NOW fixed channel: 6
 [BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
+[BASE][NETWORK] transport=wifi configured=yes
+[BASE][MQTT] Connected, rover_llh_filter=aitogy/base/rovers/+/llh
+[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/.../llh seq=... bytes=...
 [BASE][SETUP] Khoi dong hoan tat
 [BASE][HEALTH] rtcm_valid=..., frames_acked=..., fragments_sent=..., ack_timeout=..., queue_drop=..., stale_drop=...
+[BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 signal_dbm=...
 ```
 
 ## Lỗi thường gặp cần tránh
@@ -571,7 +670,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 | Gửi broadcast RTCM | Dùng unicast tới MAC Rover |
 | Gửi frame RTCM sai CRC | Kiểm tra CRC24Q trước khi chia fragment |
 | Fragment cuối gửi dư byte | Gửi đúng `sizeof(header) + payloadLength` |
-| Router Wi-Fi làm đổi channel | Field mode không kết nối router/AP |
+| Router Wi-Fi làm đổi channel | Cố định router, Base và Rover cùng channel 6; firmware Wi-Fi chỉ thử kết nối trên channel này |
 
 ## Kết luận
 
@@ -613,3 +712,13 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã bổ sung health log Base: `rovers`, `stored_rovers`, `pairing`, `pair_resp`, `pair_confirm`, `pair_auth_fail`.
 - Đã build xác nhận sau pairing Base-side: `esp32u_base_espnow` SUCCESS, RAM 44.984/327.680 byte (13,7%), Flash 749.521/1.310.720 byte (57,2%).
 - Đã xóa MAC Rover hard-code khỏi Base ngày 2026-07-08: không còn `ESPNOW_ROVER_MAC`, không còn fallback MAC tĩnh trong `BaseEspnow_sender`. Base chỉ lấy danh sách Rover từ NVS/Preferences do pairing ghi vào; nếu NVS rỗng thì Base chờ pairing và chưa gửi RTCM runtime. Build `esp32u_base_espnow` SUCCESS, RAM 44.984/327.680 byte (13,7%), Flash 749.409/1.310.720 byte (57,2%).
+
+### 2026-07-16
+
+- Đã thêm `NetworkMqttManager` hỗ trợ Wi-Fi hoặc SIM7600/4G theo environment PlatformIO, chạy trong task priority thấp riêng để reconnect Internet/MQTT không chặn RTCM reader/sender hay vòng pairing ESP-NOW.
+- Environment mặc định `esp32u_base_espnow` dùng Wi-Fi để test; Wi-Fi chỉ kết nối router trên `ESPNOW_WIFI_CHANNEL=6`. Environment `esp32u_base_4g_mqtt` đã được chuẩn bị cho TinyGSM/SIM7600, chờ xác nhận phần cứng GPIO/nguồn/PWRKEY.
+- Đã thêm MQTT test với retained status/LWT, subscribe command chỉ để log và thống kê `[BASE][NETWORK_HEALTH]`. RTCM vẫn chỉ truyền bằng ESP-NOW LR.
+- Đã thêm `include/Network_Secrets.example.h` và file local `include/Network_Secrets.h` bị Git bỏ qua để không đưa Wi-Fi/MQTT/APN credentials vào repository.
+- Đã build thành công environment Wi-Fi `esp32u_base_espnow` sau khi thêm MQTT LLH: RAM 46.736/327.680 byte (14,3%), Flash 777.833/1.310.720 byte (59,3%).
+- Đã build thành công environment 4G `esp32u_base_4g_mqtt` với TinyGSM/SIM7600 sau khi thêm MQTT LLH: RAM 45.664/327.680 byte (13,9%), Flash 767.525/1.310.720 byte (58,6%). Chưa kiểm thử kết nối thực vì mạch 4G chưa hoàn thiện.
+- Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/base/rovers/<MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
