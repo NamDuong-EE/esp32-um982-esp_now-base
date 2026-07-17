@@ -24,15 +24,18 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 ### Telemetry LLH Rover -> Base -> MQTT
 
 - Packet runtime `ROVER_LLH_STATUS` type 6 co kich thuoc 20 byte, dung `int32_t`: latitude/longitude nhan `10^7`, height MSL doi tu met sang millimetre.
-- Chi Rover Normal gui truc tiep ve Base da pair, toi da 1 Hz. Relay va Rover con chua gui/chuyen tiep LLH trong giai doan nay.
+- Rover con gui type 6 toi Relay da pair. Relay them MAC Rover con va forward bang `RELAYED_ROVER_LLH_STATUS` type 7, 28 byte.
+- Base chi chap nhan packet type 7 neu source radio la mot Relay/Rover da pair; danh tinh MQTT van la MAC Rover con nam trong packet.
+- Queue LLH cua Relay chi giu latest snapshot. Khi RTCM/TX dang ban, LLH cu co the bi ghi de hoac bo qua, khong tao backlog.
 - Packet LLH khong retry. Neu TX manager Rover dang ban boi pairing hoac RTCM ACK thi bo luot hien tai; packet moi se thu lai sau mot giay.
 - Base chi chap nhan source MAC nam trong danh sach Rover da pair va validate length/magic/version/type/mien toa do.
-- Base giu mot snapshot moi nhat cho moi Rover trong RAM; packet moi ghi de packet cu. LLH khong duoc ghi vao NVS/flash.
+- Base giu toi da 10 nguon LLH trong RAM (5 peer truc tiep + toi da 5 Rover con); packet moi ghi de packet cu. LLH khong duoc ghi vao NVS/flash.
 - Khi Base restart, snapshot RAM mat va Rover se gui lai. NVS van chi luu danh sach MAC da pair.
 - Base log snapshot moi va publish moi snapshot mot lan len topic MQTT rieng theo MAC Rover. Neu MQTT mat ket noi, Base khong tao backlog; sau khi reconnect chi snapshot moi nhat cua moi Rover duoc gui.
 
 ```text
 [BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=12 lat=21.0734567 lon=105.8123456 height_m=12.345 age_ms=20
+[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=13 lat=21.0734567 lon=105.8123456 height_m=12.345 via=relay relay_mac=68:09:47:9D:33:70 age_ms=20
 [BASE][MQTT][LLH] Published topic=aitogy/base/rovers/582ABD71E4F0/llh seq=12 bytes=...
 ```
 

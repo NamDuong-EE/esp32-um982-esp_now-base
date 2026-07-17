@@ -23,7 +23,7 @@ struct RoverPeer {
 
 BaseEspnowStats stats;
 RoverPeer roverPeers[ESPNOW_MAX_PAIRED_ROVERS] = {};
-BaseRoverLlhStatus latestRoverLlh[ESPNOW_MAX_PAIRED_ROVERS] = {};
+BaseRoverLlhStatus latestRoverLlh[ESPNOW_MAX_LLH_SOURCES] = {};
 size_t roverPeerCount = 0;
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE peerMux = portMUX_INITIALIZER_UNLOCKED;
@@ -207,6 +207,54 @@ bool findRoverPeerIndex(const uint8_t* mac, size_t& selectedIndex)
     }
     portEXIT_CRITICAL(&peerMux);
     return found;
+}
+
+bool storeLatestRoverLlh(const uint8_t* roverMac,
+                         const uint8_t* relayMac,
+                         bool viaRelay,
+                         uint32_t sequence,
+                         int32_t latitudeE7,
+                         int32_t longitudeE7,
+                         int32_t heightMm)
+{
+    const uint32_t receivedAtMs = millis();
+    size_t selectedIndex = ESPNOW_MAX_LLH_SOURCES;
+    size_t freeIndex = ESPNOW_MAX_LLH_SOURCES;
+    portENTER_CRITICAL(&llhMux);
+    for (size_t index = 0; index < ESPNOW_MAX_LLH_SOURCES; ++index) {
+        if (latestRoverLlh[index].valid &&
+            macEquals(latestRoverLlh[index].mac, roverMac)) {
+            selectedIndex = index;
+            break;
+        }
+        if (!latestRoverLlh[index].valid && freeIndex == ESPNOW_MAX_LLH_SOURCES) {
+            freeIndex = index;
+        }
+    }
+    if (selectedIndex == ESPNOW_MAX_LLH_SOURCES) {
+        selectedIndex = freeIndex;
+    }
+    if (selectedIndex == ESPNOW_MAX_LLH_SOURCES) {
+        portEXIT_CRITICAL(&llhMux);
+        return false;
+    }
+
+    BaseRoverLlhStatus& latest = latestRoverLlh[selectedIndex];
+    std::memcpy(latest.mac, roverMac, sizeof(latest.mac));
+    if (viaRelay && relayMac != nullptr) {
+        std::memcpy(latest.relayMac, relayMac, sizeof(latest.relayMac));
+    } else {
+        std::memset(latest.relayMac, 0, sizeof(latest.relayMac));
+    }
+    latest.viaRelay = viaRelay;
+    latest.sequence = sequence;
+    latest.latitudeE7 = latitudeE7;
+    latest.longitudeE7 = longitudeE7;
+    latest.heightMm = heightMm;
+    latest.receivedAtMs = receivedAtMs;
+    latest.valid = true;
+    portEXIT_CRITICAL(&llhMux);
+    return true;
 }
 
 size_t copyRoverPeers(RoverPeer* destination, size_t capacity)
@@ -402,24 +450,49 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
             return;
         }
 
-        size_t roverIndex = 0;
-        if (!findRoverPeerIndex(sourceMac, roverIndex) ||
-            roverIndex >= ESPNOW_MAX_PAIRED_ROVERS) {
+        size_t ignoredIndex = 0;
+        if (!findRoverPeerIndex(sourceMac, ignoredIndex)) {
             incrementStat(&BaseEspnowStats::llhStatusUnknownSource);
             return;
         }
-
-        portENTER_CRITICAL(&llhMux);
-        BaseRoverLlhStatus& latest = latestRoverLlh[roverIndex];
-        std::memcpy(latest.mac, sourceMac, sizeof(latest.mac));
-        latest.sequence = packet.sequence;
-        latest.latitudeE7 = packet.latitudeE7;
-        latest.longitudeE7 = packet.longitudeE7;
-        latest.heightMm = packet.heightMm;
-        latest.receivedAtMs = millis();
-        latest.valid = true;
-        portEXIT_CRITICAL(&llhMux);
+        if (!storeLatestRoverLlh(sourceMac, nullptr, false,
+                                 packet.sequence,
+                                 packet.latitudeE7,
+                                 packet.longitudeE7,
+                                 packet.heightMm)) {
+            incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
+            return;
+        }
         incrementStat(&BaseEspnowStats::llhStatusReceived);
+        return;
+    }
+
+    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS) {
+        if (length != static_cast<int>(sizeof(RelayedRoverLlhStatusPacket))) {
+            incrementStat(&BaseEspnowStats::llhStatusInvalid);
+            return;
+        }
+        RelayedRoverLlhStatusPacket packet{};
+        std::memcpy(&packet, data, sizeof(packet));
+        if (!rtcmEspNowValidateRelayedRoverLlhStatus(packet, sizeof(packet))) {
+            incrementStat(&BaseEspnowStats::llhStatusInvalid);
+            return;
+        }
+        size_t ignoredIndex = 0;
+        if (!findRoverPeerIndex(sourceMac, ignoredIndex)) {
+            incrementStat(&BaseEspnowStats::llhStatusUnknownSource);
+            return;
+        }
+        if (!storeLatestRoverLlh(packet.roverMac, sourceMac, true,
+                                 packet.sequence,
+                                 packet.latitudeE7,
+                                 packet.longitudeE7,
+                                 packet.heightMm)) {
+            incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
+            return;
+        }
+        incrementStat(&BaseEspnowStats::llhStatusReceived);
+        incrementStat(&BaseEspnowStats::llhStatusRelayedReceived);
         return;
     }
 
@@ -954,9 +1027,9 @@ size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
     if (destination == nullptr || capacity == 0) {
         return 0;
     }
-    portENTER_CRITICAL(&peerMux);
-    const size_t count = roverPeerCount < capacity ? roverPeerCount : capacity;
-    portEXIT_CRITICAL(&peerMux);
+    const size_t count = ESPNOW_MAX_LLH_SOURCES < capacity
+                             ? ESPNOW_MAX_LLH_SOURCES
+                             : capacity;
     portENTER_CRITICAL(&llhMux);
     for (size_t index = 0; index < count; ++index) {
         destination[index] = latestRoverLlh[index];

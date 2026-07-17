@@ -7,6 +7,8 @@
 
 struct BaseRoverLlhStatus {
     uint8_t mac[6] = {};
+    uint8_t relayMac[6] = {};
+    bool viaRelay = false;
     uint32_t sequence = 0;
     int32_t latitudeE7 = 0;
     int32_t longitudeE7 = 0;
@@ -34,8 +36,10 @@ struct BaseEspnowStats {
     uint32_t pairConfirmsSent = 0;
     uint32_t pairAuthFailures = 0;
     uint32_t llhStatusReceived = 0;
+    uint32_t llhStatusRelayedReceived = 0;
     uint32_t llhStatusInvalid = 0;
     uint32_t llhStatusUnknownSource = 0;
+    uint32_t llhStatusCapacityDrops = 0;
     bool pairingActive = false;
 };
 

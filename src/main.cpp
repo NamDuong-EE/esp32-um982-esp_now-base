@@ -268,7 +268,8 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "fragments_sent=%lu send_fail=%lu send_timeout=%lu frame_retry=%lu ack_timeout=%lu "
             "ack_rx=%lu ack_invalid=%lu frame_deadline=%lu task_send_ok=%lu task_send_fail=%lu "
             "rovers=%lu stored_rovers=%lu pairing=%u pair_resp=%lu pair_confirm=%lu "
-            "pair_auth_fail=%lu llh_rx=%lu llh_invalid=%lu llh_unknown=%lu "
+            "pair_auth_fail=%lu llh_rx=%lu llh_relayed=%lu llh_invalid=%lu "
+            "llh_unknown=%lu llh_capacity_drop=%lu "
             "send_ms=%lu send_max_ms=%lu free_heap=%u\n",
             static_cast<unsigned long>(periodMs),
             static_cast<double>(deltaRawBytes) / seconds,
@@ -305,8 +306,10 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(espnow.pairConfirmsSent),
             static_cast<unsigned long>(espnow.pairAuthFailures),
             static_cast<unsigned long>(espnow.llhStatusReceived),
+            static_cast<unsigned long>(espnow.llhStatusRelayedReceived),
             static_cast<unsigned long>(espnow.llhStatusInvalid),
             static_cast<unsigned long>(espnow.llhStatusUnknownSource),
+            static_cast<unsigned long>(espnow.llhStatusCapacityDrops),
             static_cast<unsigned long>(espnow.lastFrameSendMs),
             static_cast<unsigned long>(espnow.maxFrameSendMs),
             ESP.getFreeHeap());
@@ -371,13 +374,13 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
 
 [[noreturn]] void roverLlhLogTask(void*)
 {
-    uint32_t lastSequences[ESPNOW_MAX_PAIRED_ROVERS] = {};
-    bool haveSequence[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    uint32_t lastSequences[ESPNOW_MAX_LLH_SOURCES] = {};
+    bool haveSequence[ESPNOW_MAX_LLH_SOURCES] = {};
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(200));
-        BaseRoverLlhStatus snapshots[ESPNOW_MAX_PAIRED_ROVERS] = {};
+        BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
         const size_t count = baseEspNowCopyLatestRoverLlh(
-            snapshots, ESPNOW_MAX_PAIRED_ROVERS);
+            snapshots, ESPNOW_MAX_LLH_SOURCES);
         for (size_t index = 0; index < count; ++index) {
             const BaseRoverLlhStatus& status = snapshots[index];
             if (!status.valid ||
@@ -394,13 +397,22 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                 RTCM_ESPNOW_LLH_COORDINATE_SCALE;
             const double heightM =
                 static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
+            char relayMacText[18] = {};
+            if (status.viaRelay) {
+                snprintf(relayMacText, sizeof(relayMacText),
+                         "%02X:%02X:%02X:%02X:%02X:%02X",
+                         status.relayMac[0], status.relayMac[1], status.relayMac[2],
+                         status.relayMac[3], status.relayMac[4], status.relayMac[5]);
+            }
             Serial.printf(
                 "[BASE][ROVER_LLH] mac=%02X:%02X:%02X:%02X:%02X:%02X seq=%lu "
-                "lat=%.7f lon=%.7f height_m=%.3f age_ms=%lu\n",
+                "lat=%.7f lon=%.7f height_m=%.3f via=%s relay_mac=%s age_ms=%lu\n",
                 status.mac[0], status.mac[1], status.mac[2],
                 status.mac[3], status.mac[4], status.mac[5],
                 static_cast<unsigned long>(status.sequence),
                 latitude, longitude, heightM,
+                status.viaRelay ? "relay" : "direct",
+                relayMacText,
                 static_cast<unsigned long>(millis() - status.receivedAtMs));
         }
     }

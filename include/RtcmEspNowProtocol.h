@@ -12,6 +12,7 @@ inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_DISCOVERY = 3;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_RESPONSE = 4;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_CONFIRM = 5;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS = 6;
+inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS = 7;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_BASE = 1;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_ROVER = 2;
 inline constexpr double RTCM_ESPNOW_LLH_COORDINATE_SCALE = 10000000.0;
@@ -57,6 +58,16 @@ struct RoverLlhStatusPacket {
     int32_t heightMm;
 };
 
+struct RelayedRoverLlhStatusPacket {
+    RtcmEspNowCommonHeader common;
+    uint32_t sequence;
+    uint8_t roverMac[6];
+    uint8_t reserved[2];
+    int32_t latitudeE7;
+    int32_t longitudeE7;
+    int32_t heightMm;
+};
+
 struct RtcmEspNowPairDiscovery {
     RtcmEspNowCommonHeader common;
     uint8_t role;
@@ -94,6 +105,8 @@ static_assert(sizeof(RtcmEspNowCommonHeader) == 4, "RTCM ESP-NOW common header m
 static_assert(sizeof(RtcmEspNowHeader) == 16, "RTCM ESP-NOW header must be 16 bytes");
 static_assert(sizeof(RtcmEspNowAck) == 12, "RTCM ESP-NOW ACK must be 12 bytes");
 static_assert(sizeof(RoverLlhStatusPacket) == 20, "ROVER_LLH_STATUS must be 20 bytes");
+static_assert(sizeof(RelayedRoverLlhStatusPacket) == 28,
+              "RELAYED_ROVER_LLH_STATUS must be 28 bytes");
 static_assert(sizeof(RtcmEspNowPairDiscovery) == 28, "PAIR_DISCOVERY must be 28 bytes");
 static_assert(sizeof(RtcmEspNowPairResponse) == 28, "PAIR_RESPONSE must be 28 bytes");
 static_assert(sizeof(RtcmEspNowPairConfirm) == 24, "PAIR_CONFIRM must be 24 bytes");
@@ -181,6 +194,25 @@ inline bool rtcmEspNowValidateRoverLlhStatus(const RoverLlhStatusPacket& packet,
            packet.common.magic == RTCM_ESPNOW_MAGIC &&
            packet.common.version == RTCM_ESPNOW_VERSION &&
            packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS &&
+           packet.latitudeE7 >= -900000000 && packet.latitudeE7 <= 900000000 &&
+           packet.longitudeE7 >= -1800000000 && packet.longitudeE7 <= 1800000000;
+}
+
+inline bool rtcmEspNowValidateRelayedRoverLlhStatus(
+    const RelayedRoverLlhStatusPacket& packet,
+    size_t receivedLength)
+{
+    bool macConfigured = false;
+    bool macBroadcast = true;
+    for (uint8_t octet : packet.roverMac) {
+        macConfigured = macConfigured || octet != 0;
+        macBroadcast = macBroadcast && octet == 0xFF;
+    }
+    return receivedLength == sizeof(RelayedRoverLlhStatusPacket) &&
+           packet.common.magic == RTCM_ESPNOW_MAGIC &&
+           packet.common.version == RTCM_ESPNOW_VERSION &&
+           packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS &&
+           macConfigured && !macBroadcast && (packet.roverMac[0] & 0x01U) == 0 &&
            packet.latitudeE7 >= -900000000 && packet.latitudeE7 <= 900000000 &&
            packet.longitudeE7 >= -1800000000 && packet.longitudeE7 <= 1800000000;
 }

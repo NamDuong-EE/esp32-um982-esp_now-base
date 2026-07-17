@@ -40,7 +40,7 @@ struct PublishedLlhState {
     bool hasPublished = false;
 };
 
-PublishedLlhState publishedLlh[ESPNOW_MAX_PAIRED_ROVERS] = {};
+PublishedLlhState publishedLlh[ESPNOW_MAX_LLH_SOURCES] = {};
 #if CONNECT_USING_4G
 bool modemInitialized = false;
 #endif
@@ -214,9 +214,9 @@ PublishedLlhState* publishedStateFor(const uint8_t* mac)
 
 void publishLatestRoverLlh(uint32_t now)
 {
-    BaseRoverLlhStatus snapshots[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
     const size_t count = baseEspNowCopyLatestRoverLlh(
-        snapshots, ESPNOW_MAX_PAIRED_ROVERS);
+        snapshots, ESPNOW_MAX_LLH_SOURCES);
 
     for (size_t index = 0; index < count; ++index) {
         const BaseRoverLlhStatus& status = snapshots[index];
@@ -246,6 +246,14 @@ void publishLatestRoverLlh(uint32_t now)
                  "%02X:%02X:%02X:%02X:%02X:%02X",
                  status.mac[0], status.mac[1], status.mac[2],
                  status.mac[3], status.mac[4], status.mac[5]);
+        char relayMacText[18] = {};
+        if (status.viaRelay) {
+            snprintf(relayMacText,
+                     sizeof(relayMacText),
+                     "%02X:%02X:%02X:%02X:%02X:%02X",
+                     status.relayMac[0], status.relayMac[1], status.relayMac[2],
+                     status.relayMac[3], status.relayMac[4], status.relayMac[5]);
+        }
         snprintf(topic,
                  sizeof(topic),
                  "%s/%02X%02X%02X%02X%02X%02X/llh",
@@ -263,12 +271,15 @@ void publishLatestRoverLlh(uint32_t now)
                  sizeof(payload),
                  "{\"rover_mac\":\"%s\",\"sequence\":%lu,"
                  "\"latitude\":%.7f,\"longitude\":%.7f,"
-                 "\"height_m\":%.3f,\"source_age_ms\":%lu}",
+                 "\"height_m\":%.3f,\"via_relay\":%s,"
+                 "\"relay_mac\":\"%s\",\"source_age_ms\":%lu}",
                  macText,
                  static_cast<unsigned long>(status.sequence),
                  latitude,
                  longitude,
                  heightM,
+                 status.viaRelay ? "true" : "false",
+                 relayMacText,
                  static_cast<unsigned long>(now - status.receivedAtMs));
 
         if (mqtt.publish(topic, payload, false)) {
