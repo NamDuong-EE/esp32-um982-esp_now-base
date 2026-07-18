@@ -105,7 +105,9 @@ inline constexpr uint32_t PAIRING_BUTTON_HOLD_MS = 1500;
 inline constexpr uint32_t PAIRING_WINDOW_MS = 60000;
 inline constexpr uint32_t PAIR_DISCOVERY_INTERVAL_MS = 500;
 inline constexpr uint8_t ESPNOW_MAX_PAIRED_ROVERS = 5;
-inline constexpr uint8_t ESPNOW_MAX_LLH_SOURCES = ESPNOW_MAX_PAIRED_ROVERS * 2;
+inline constexpr uint8_t ESPNOW_MAX_CHILDREN_PER_RELAY = 5;
+inline constexpr uint8_t ESPNOW_MAX_LLH_SOURCES =
+    ESPNOW_MAX_PAIRED_ROVERS * (1 + ESPNOW_MAX_CHILDREN_PER_RELAY);
 inline constexpr uint32_t ESPNOW_NETWORK_ID = 0xA1700001UL;
 inline constexpr uint8_t ESPNOW_PAIRING_KEY[16] = {
     0x41, 0x49, 0x54, 0x4F, 0x47, 0x59, 0x5F, 0x50,
