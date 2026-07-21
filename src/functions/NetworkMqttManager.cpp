@@ -1,6 +1,7 @@
 #include "functions/NetworkMqttManager.h"
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <cstring>
 
@@ -29,6 +30,8 @@ uint32_t lastNetworkAttemptAtMs = 0;
 uint32_t lastMqttAttemptAtMs = 0;
 bool previousInternetConnected = false;
 bool previousMqttConnected = false;
+bool hasPendingGnssCommandResult = false;
+BaseGnssCommandResultEvent pendingGnssCommandResult{};
 
 struct PublishedLlhState {
     uint8_t mac[6] = {};
@@ -74,6 +77,18 @@ bool credentialsConfigured()
 #endif
 }
 
+const char* gnssCommandAction(uint8_t commandId)
+{
+    switch (commandId) {
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN:
+        return "switch_to_base_survey_in";
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
+        return "switch_to_rover";
+    default:
+        return "unknown";
+    }
+}
+
 void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 {
     constexpr unsigned int maxLogLength = 160;
@@ -84,6 +99,61 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
         Serial.print("...");
     }
     Serial.println();
+
+    if (std::strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+        return;
+    }
+    incrementStat(&NetworkMqttStats::commandsReceived);
+
+    JsonDocument document;
+    const DeserializationError error = deserializeJson(document, payload, length);
+    if (error) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] Invalid JSON: %s\n",
+                      error.c_str());
+        return;
+    }
+
+    const char* action = document["action"] | "";
+    const bool switchToBase =
+        std::strcmp(action, "switch_to_base_survey_in") == 0;
+    const bool switchToRover = std::strcmp(action, "switch_to_rover") == 0;
+    if (!switchToBase && !switchToRover) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] Unsupported action=%s\n", action);
+        return;
+    }
+
+    uint32_t transactionId = document["transaction_id"] | 0U;
+    if (transactionId == 0) {
+        do {
+            transactionId = esp_random();
+        } while (transactionId == 0);
+    }
+    const uint32_t durationSeconds = switchToBase
+                                         ? (document["duration_s"] |
+                                            MQTT_DEFAULT_SURVEY_DURATION_SECONDS)
+                                         : 0;
+    uint8_t targetMac[6] = {};
+    const BaseGnssCommandQueueResult queueResult = switchToBase
+        ? baseEspNowQueueFirstRoverBaseSurveyIn(transactionId,
+                                                durationSeconds,
+                                                targetMac)
+        : baseEspNowQueueFirstRoverMode(transactionId, targetMac);
+    if (queueResult != BaseGnssCommandQueueResult::Queued) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu result=%s\n",
+                      static_cast<unsigned long>(transactionId),
+                      baseGnssCommandQueueResultToString(queueResult));
+        return;
+    }
+
+    Serial.printf("[BASE][MQTT][GNSS_CMD] Queued txn=%lu action=%s duration_s=%lu first_rover=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  static_cast<unsigned long>(transactionId),
+                  action,
+                  static_cast<unsigned long>(durationSeconds),
+                  targetMac[0], targetMac[1], targetMac[2],
+                  targetMac[3], targetMac[4], targetMac[5]);
 }
 
 bool internetConnected()
@@ -302,6 +372,72 @@ void publishLatestRoverLlh(uint32_t now)
         }
     }
 }
+
+const char* gnssCommandStatusText(const BaseGnssCommandResultEvent& result)
+{
+    if (result.responseTimedOut) {
+        return "response_timeout";
+    }
+    switch (result.status) {
+    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN:
+        return "uart_sequence_written";
+    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_REJECTED:
+        return "rejected";
+    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_ERROR:
+        return "uart_error";
+    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_BUSY:
+        return "busy";
+    default:
+        return "unknown";
+    }
+}
+
+void publishGnssCommandResult(uint32_t now)
+{
+    if (!hasPendingGnssCommandResult) {
+        hasPendingGnssCommandResult =
+            baseEspNowPopGnssCommandResult(pendingGnssCommandResult);
+    }
+    if (!hasPendingGnssCommandResult) {
+        return;
+    }
+
+    char macText[18] = {};
+    snprintf(macText,
+             sizeof(macText),
+             "%02X:%02X:%02X:%02X:%02X:%02X",
+             pendingGnssCommandResult.roverMac[0],
+             pendingGnssCommandResult.roverMac[1],
+             pendingGnssCommandResult.roverMac[2],
+             pendingGnssCommandResult.roverMac[3],
+             pendingGnssCommandResult.roverMac[4],
+             pendingGnssCommandResult.roverMac[5]);
+    char resultPayload[320] = {};
+    snprintf(resultPayload,
+             sizeof(resultPayload),
+             "{\"transaction_id\":%lu,\"target_mac\":\"%s\","
+             "\"action\":\"%s\",\"status\":\"%s\","
+             "\"completed_step\":%u,\"total_steps\":%u,"
+             "\"detail_code\":%u,\"result_age_ms\":%lu}",
+             static_cast<unsigned long>(pendingGnssCommandResult.transactionId),
+             macText,
+             gnssCommandAction(pendingGnssCommandResult.commandId),
+             gnssCommandStatusText(pendingGnssCommandResult),
+             pendingGnssCommandResult.completedStep,
+             pendingGnssCommandResult.totalSteps,
+             pendingGnssCommandResult.detailCode,
+             static_cast<unsigned long>(now - pendingGnssCommandResult.receivedAtMs));
+
+    if (!mqtt.publish(MQTT_TOPIC_COMMAND_RESULT, resultPayload, false)) {
+        incrementStat(&NetworkMqttStats::commandResultPublishFailures);
+        return;
+    }
+    incrementStat(&NetworkMqttStats::commandResultsPublished);
+    Serial.printf("[BASE][MQTT][GNSS_CMD] Result published txn=%lu status=%s\n",
+                  static_cast<unsigned long>(pendingGnssCommandResult.transactionId),
+                  gnssCommandStatusText(pendingGnssCommandResult));
+    hasPendingGnssCommandResult = false;
+}
 }
 
 void setupNetworkMqtt()
@@ -393,6 +529,7 @@ void networkMqttLoop()
 
     mqtt.loop();
     if (mqtt.connected()) {
+        publishGnssCommandResult(now);
         publishLatestRoverLlh(now);
     }
 }

@@ -65,7 +65,9 @@ inline constexpr char MQTT_USER[] = BASE_MQTT_USER;
 inline constexpr char MQTT_PASSWORD[] = BASE_MQTT_PASSWORD;
 inline constexpr char MQTT_TOPIC_STATUS[] = "aitogy/base/test/status";
 inline constexpr char MQTT_TOPIC_COMMAND[] = "aitogy/base/test/command";
+inline constexpr char MQTT_TOPIC_COMMAND_RESULT[] = "aitogy/base/test/command-result";
 inline constexpr char MQTT_TOPIC_ROVER_LLH_PREFIX[] = "aitogy/base/rovers";
+inline constexpr uint32_t MQTT_DEFAULT_SURVEY_DURATION_SECONDS = 60;
 inline constexpr uint32_t NETWORK_RECONNECT_INTERVAL_MS = 10000;
 inline constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 inline constexpr uint32_t MQTT_LLH_RETRY_INTERVAL_MS = 1000;
@@ -95,6 +97,10 @@ inline constexpr uint8_t ESPNOW_SEND_RETRY_COUNT = 2;
 inline constexpr uint32_t ESPNOW_FRAME_SEND_DEADLINE_MS = 1000;
 inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
 inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
+inline constexpr size_t ESPNOW_GNSS_COMMAND_QUEUE_LENGTH = 4;
+inline constexpr size_t ESPNOW_GNSS_COMMAND_RESULT_QUEUE_LENGTH = 4;
+inline constexpr uint32_t ESPNOW_GNSS_COMMAND_RESULT_TIMEOUT_MS = 10000;
+inline constexpr uint8_t ESPNOW_GNSS_COMMAND_SEND_RETRY_COUNT = 1;
 
 // ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to
 // discover MAC addresses by broadcast, then switch back to unicast runtime.

@@ -418,7 +418,8 @@ MQTT test dùng các topic:
 |---|---|---|
 | `aitogy/base/test/status` | Base publish retained | `online`; LWT ghi `offline` |
 | `aitogy/base/rovers/<MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height và source age |
-| `aitogy/base/test/command` | Base subscribe | Chỉ log payload để test downlink, không tự động gửi lệnh xuống UM980 |
+| `aitogy/base/test/command` | Base subscribe | Nhận lệnh điều khiển GNSS; V1 chỉ cho phép `switch_to_base_survey_in` |
+| `aitogy/base/test/command-result` | Base publish | Kết quả Rover đã ghi chuỗi lệnh xuống UM980 qua COM2 hoặc lỗi/timeout |
 
 Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/llh`:
 
@@ -427,6 +428,42 @@ Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/llh`:
 ```
 
 Server có thể subscribe wildcard `aitogy/base/rovers/+/llh` để nhận LLH của tất cả Rover đã pair. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và LLH mới.
+
+### Điều khiển UM980 chuyển giữa Rover và temporary Base - V1
+
+Publish JSON sau vào `aitogy/base/test/command`:
+
+```json
+{"action":"switch_to_base_survey_in","duration_s":60,"transaction_id":123}
+```
+
+- `duration_s`: thời gian survey-in, hợp lệ từ 10 đến 86400 giây; mặc định 60 giây.
+- `transaction_id`: số khác 0 để đối chiếu request/result. Có thể bỏ qua để Base tự sinh.
+- V1 luôn chọn **Rover trực tiếp đầu tiên** trong danh sách peer đã pair; chưa hỗ trợ `target_mac`, Relay hoặc phát lệnh cho nhiều Rover.
+- Base đóng gói lệnh thành packet ESP-NOW unicast type `8`, có `network_id`, transaction ID và `auth_tag` từ pairing key. Rover trả packet result type `9` về đúng Base.
+- Rover chỉ chấp nhận semantic command trong allowlist, không nhận chuỗi UART tùy ý từ MQTT.
+
+Rover khóa UART COM2 và ghi tuần tự 14 bước: `unlogall`, `mode base time <duration_s>`, `gpgga com2 1`, RTCM `1006`, `1033`, `1074`, `1124`, `1084`, `1094`, `1042`, `1019`, `1020`, `1045` trên COM2 mỗi 1 giây, cuối cùng `saveconfig`. V1 không gửi `FRESET`.
+
+Để đưa temporary Base đầu tiên trở lại Rover, publish một transaction ID mới:
+
+```json
+{"action":"switch_to_rover","transaction_id":124}
+```
+
+Rover ghi 4 bước: `unlogall`, `mode rover survey`, `gpgga com2 1`, `saveconfig`. Khi result thành công, Rover mở lại nhận RTCM/gửi LLH và Base bật lại RTCM tới peer đó. `duration_s` không dùng cho action này. Cú pháp `MODE ROVER` yêu cầu UM980 Build7923+ hoặc UM982 Build7650+ theo Commands Manual N4 của Unicore.
+
+Kết quả được publish lên `aitogy/base/test/command-result`:
+
+```json
+{"transaction_id":123,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_survey_in","status":"uart_sequence_written","completed_step":14,"total_steps":14,"detail_code":0,"result_age_ms":8}
+```
+
+`uart_sequence_written` chỉ xác nhận ESP32 Rover đã ghi đủ 14 lệnh vào UART, chưa xác nhận UM980 đã survey-in thành công. Sau kết quả này Rover ngừng nhận RTCM và Base ngừng gửi RTCM tới peer đó trong RAM; reset một trong hai ESP32 sẽ xóa trạng thái chuyển vai trò tạm thời. ESP32 phía Rover vẫn đang chạy firmware Rover, chưa có pipeline đọc RTCM và phát correction như một Base hoàn chỉnh.
+
+Kết quả `switch_to_rover` dùng cùng topic/schema nhưng có `action="switch_to_rover"`, `completed_step=4` và `total_steps=4`. Firmware chỉ bật lại RTCM sau result thành công.
+
+Base chờ result tối đa 10 giây và retry request một lần. Rover nhớ transaction hoàn tất gần nhất để request lặp chỉ trả lại result, không ghi lại chuỗi lệnh. MQTT hiện dùng TCP 1883 và ESP-NOW encryption mặc định còn tắt, vì vậy đây là bản test trong mạng tin cậy.
 
 Bản hiện tại dùng MQTT TCP port `1883` để thử nghiệm trong mạng tin cậy, chưa bật TLS. Khi dùng server thực tế qua Internet cần bổ sung TLS/xác thực chứng chỉ trước khi triển khai.
 
@@ -646,6 +683,7 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 21. [ ] Điền credentials và kiểm tra Wi-Fi/MQTT với broker thật trong khi Rover vẫn nhận RTCM LR.
 22. [ ] Hoàn thiện mạch 4G, xác nhận GPIO/nguồn/PWRKEY/APN và kiểm tra environment `esp32u_base_4g_mqtt` trên SIM7600 thật.
 23. [x] Nhận LLH từ từng Rover, giữ snapshot mới nhất và publish lên topic MQTT phân theo MAC; không tạo backlog khi offline.
+24. [x] V1 nhận MQTT command và gửi ESP-NOW unicast tới Rover trực tiếp đầu tiên để cấu hình UM980 thành Base survey-in qua COM2; nhận result và dừng RTCM tới peer đã chuyển vai trò trong RAM.
 
 ## Log mong đợi sau khi hoàn thiện
 
@@ -725,3 +763,12 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã build thành công environment Wi-Fi `esp32u_base_espnow` sau khi thêm MQTT LLH: RAM 46.736/327.680 byte (14,3%), Flash 777.833/1.310.720 byte (59,3%).
 - Đã build thành công environment 4G `esp32u_base_4g_mqtt` với TinyGSM/SIM7600 sau khi thêm MQTT LLH: RAM 45.664/327.680 byte (13,9%), Flash 767.525/1.310.720 byte (58,6%). Chưa kiểm thử kết nối thực vì mạch 4G chưa hoàn thiện.
 - Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/base/rovers/<MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
+
+### 2026-07-21
+
+- Đã triển khai remote command V1 `switch_to_base_survey_in`: Base parse JSON MQTT, chọn Rover trực tiếp đầu tiên đã pair và gửi packet type `8` bằng ESP-NOW unicast với `network_id`, transaction ID, COM2, survey duration và auth tag.
+- Đã thêm packet result type `9`, timeout 10 giây, retry request một lần, queue command/result và publish kết quả lên `aitogy/base/test/command-result`.
+- Khi Rover trả `uart_sequence_written`, Base giữ peer cho control nhưng tạm ngừng gửi RTCM tới peer đó; health log thêm `rtcm_rovers` và các counter `cmd_*`. Trạng thái này chỉ ở RAM trong V1.
+- Đã thêm dependency ArduinoJson để parse command theo schema và allowlist; không chuyển tiếp raw UART command từ MQTT.
+- Build xác nhận sau khi thêm hai chiều: `esp32u_base_espnow` SUCCESS, RAM 48.632/327.680 byte (14,8%), Flash 788.793/1.310.720 byte (60,2%); `esp32u_base_4g_mqtt` SUCCESS, RAM 47.560 byte (14,5%), Flash 778.469 byte (59,4%). Chưa test MQTT/UM980 trên phần cứng trong lượt này.
+- Đã thêm action `switch_to_rover`: Base gửi command ID `2`, chờ application result rồi bật lại RTCM cho peer; `command_builder.py` có thêm `build_geotek_lte_unicore_rover_config()` với cùng chuỗi 4 lệnh COM2.

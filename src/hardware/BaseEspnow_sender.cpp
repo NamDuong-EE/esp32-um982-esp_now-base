@@ -6,6 +6,7 @@
 #include <esp_now.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #if __has_include(<esp_arduino_version.h>)
@@ -19,6 +20,14 @@ namespace {
 struct RoverPeer {
     uint8_t mac[6];
     bool stored;
+    bool rtcmEnabled;
+};
+
+struct QueuedGnssCommand {
+    uint8_t roverMac[6];
+    uint32_t transactionId;
+    uint32_t surveyDurationSeconds;
+    uint8_t commandId;
 };
 
 BaseEspnowStats stats;
@@ -39,6 +48,15 @@ uint8_t expectedAckMac[6] = {};
 SemaphoreHandle_t sendCallbackSemaphore = nullptr;
 SemaphoreHandle_t frameAckSemaphore = nullptr;
 SemaphoreHandle_t espnowSendMutex = nullptr;
+SemaphoreHandle_t gnssCommandResultSemaphore = nullptr;
+QueueHandle_t gnssCommandQueue = nullptr;
+QueueHandle_t gnssCommandResultQueue = nullptr;
+portMUX_TYPE gnssCommandMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool waitingForGnssCommandResult = false;
+uint8_t expectedGnssCommandMac[6] = {};
+uint32_t expectedGnssCommandTransactionId = 0;
+uint8_t expectedGnssCommandId = 0;
+uint32_t lastNoRtcmPeerWarningAtMs = 0;
 
 constexpr uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -70,9 +88,13 @@ void updatePeerStats()
     portENTER_CRITICAL(&peerMux);
     const size_t count = roverPeerCount;
     uint32_t storedCount = 0;
+    uint32_t rtcmEnabledCount = 0;
     for (size_t index = 0; index < roverPeerCount; ++index) {
         if (roverPeers[index].stored) {
             ++storedCount;
+        }
+        if (roverPeers[index].rtcmEnabled) {
+            ++rtcmEnabledCount;
         }
     }
     portEXIT_CRITICAL(&peerMux);
@@ -80,6 +102,7 @@ void updatePeerStats()
     portENTER_CRITICAL(&statsMux);
     stats.activeRoverCount = static_cast<uint32_t>(count);
     stats.storedRoverCount = storedCount;
+    stats.rtcmEnabledRoverCount = rtcmEnabledCount;
     portEXIT_CRITICAL(&statsMux);
 }
 
@@ -172,6 +195,7 @@ bool addRoverRuntimePeer(const uint8_t* mac, bool stored)
     for (size_t index = 0; index < roverPeerCount; ++index) {
         if (macEquals(roverPeers[index].mac, mac)) {
             roverPeers[index].stored = roverPeers[index].stored || stored;
+            roverPeers[index].rtcmEnabled = true;
             portEXIT_CRITICAL(&peerMux);
             updatePeerStats();
             return true;
@@ -187,6 +211,7 @@ bool addRoverRuntimePeer(const uint8_t* mac, bool stored)
 
     std::memcpy(roverPeers[roverPeerCount].mac, mac, 6);
     roverPeers[roverPeerCount].stored = stored;
+    roverPeers[roverPeerCount].rtcmEnabled = true;
     ++roverPeerCount;
     portEXIT_CRITICAL(&peerMux);
 
@@ -376,10 +401,41 @@ bool sendControlPacket(const uint8_t* mac, const uint8_t* packet, size_t packetL
         return false;
     }
 
-    xSemaphoreTake(sendCallbackSemaphore, pdMS_TO_TICKS(ESPNOW_SEND_TIMEOUT_MS));
+    const BaseType_t callbackReceived =
+        xSemaphoreTake(sendCallbackSemaphore, pdMS_TO_TICKS(ESPNOW_SEND_TIMEOUT_MS));
+    const bool succeeded = callbackReceived == pdTRUE && lastSendSucceeded;
     drainSendCallbackSemaphore();
     xSemaphoreGive(espnowSendMutex);
-    return true;
+    return succeeded;
+}
+
+const char* gnssCommandName(uint8_t commandId)
+{
+    switch (commandId) {
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN:
+        return "switch_to_base_survey_in";
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
+        return "switch_to_rover";
+    default:
+        return "unknown";
+    }
+}
+
+void setRoverRtcmEnabled(const uint8_t* mac, bool enabled)
+{
+    bool changed = false;
+    portENTER_CRITICAL(&peerMux);
+    for (size_t index = 0; index < roverPeerCount; ++index) {
+        if (macEquals(roverPeers[index].mac, mac)) {
+            changed = roverPeers[index].rtcmEnabled != enabled;
+            roverPeers[index].rtcmEnabled = enabled;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&peerMux);
+    if (changed) {
+        updatePeerStats();
+    }
 }
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -493,6 +549,67 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         }
         incrementStat(&BaseEspnowStats::llhStatusReceived);
         incrementStat(&BaseEspnowStats::llhStatusRelayedReceived);
+        return;
+    }
+
+    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_RESULT) {
+        if (length != static_cast<int>(sizeof(GnssCommandResultPacket))) {
+            incrementStat(&BaseEspnowStats::gnssCommandInvalidResults);
+            return;
+        }
+        GnssCommandResultPacket packet{};
+        std::memcpy(&packet, data, sizeof(packet));
+        size_t ignoredIndex = 0;
+        if (!findRoverPeerIndex(sourceMac, ignoredIndex) ||
+            !rtcmEspNowValidateGnssCommandResult(packet,
+                                                 sizeof(packet),
+                                                 ESPNOW_NETWORK_ID,
+                                                 ESPNOW_PAIRING_KEY,
+                                                 sizeof(ESPNOW_PAIRING_KEY))) {
+            incrementStat(&BaseEspnowStats::gnssCommandInvalidResults);
+            return;
+        }
+
+        bool matches = false;
+        portENTER_CRITICAL(&gnssCommandMux);
+        matches = waitingForGnssCommandResult &&
+                  macEquals(sourceMac, expectedGnssCommandMac) &&
+                  packet.transactionId == expectedGnssCommandTransactionId &&
+                  packet.commandId == expectedGnssCommandId;
+        portEXIT_CRITICAL(&gnssCommandMux);
+        if (!matches) {
+            incrementStat(&BaseEspnowStats::gnssCommandInvalidResults);
+            return;
+        }
+
+        BaseGnssCommandResultEvent event{};
+        std::memcpy(event.roverMac, sourceMac, sizeof(event.roverMac));
+        event.transactionId = packet.transactionId;
+        event.commandId = packet.commandId;
+        event.status = packet.status;
+        event.completedStep = packet.completedStep;
+        event.totalSteps = packet.totalSteps;
+        event.detailCode = packet.detailCode;
+        event.receivedAtMs = millis();
+        if (gnssCommandResultQueue != nullptr &&
+            xQueueSend(gnssCommandResultQueue, &event, 0) != pdTRUE) {
+            BaseGnssCommandResultEvent discarded{};
+            xQueueReceive(gnssCommandResultQueue, &discarded, 0);
+            xQueueSend(gnssCommandResultQueue, &event, 0);
+        }
+        incrementStat(&BaseEspnowStats::gnssCommandResults);
+        if (packet.status == RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN) {
+            const bool enableRtcm =
+                packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER;
+            setRoverRtcmEnabled(sourceMac, enableRtcm);
+            Serial.printf("[BASE][GNSS_CMD] RTCM delivery %s for peer %s action=%s\n",
+                          enableRtcm ? "enabled" : "disabled",
+                          macToString(sourceMac).c_str(),
+                          gnssCommandName(packet.commandId));
+        }
+        if (gnssCommandResultSemaphore != nullptr) {
+            xSemaphoreGive(gnssCommandResultSemaphore);
+        }
         return;
     }
 
@@ -818,6 +935,93 @@ void processPendingPairResponse()
     Serial.println("[BASE][PAIR] Paired Rover " + macToString(sourceMac));
     stopPairingMode("paired");
 }
+
+void queueLocalGnssCommandTimeout(const QueuedGnssCommand& command)
+{
+    BaseGnssCommandResultEvent event{};
+    std::memcpy(event.roverMac, command.roverMac, sizeof(event.roverMac));
+    event.transactionId = command.transactionId;
+    event.commandId = command.commandId;
+    event.receivedAtMs = millis();
+    event.responseTimedOut = true;
+    if (gnssCommandResultQueue != nullptr &&
+        xQueueSend(gnssCommandResultQueue, &event, 0) != pdTRUE) {
+        BaseGnssCommandResultEvent discarded{};
+        xQueueReceive(gnssCommandResultQueue, &discarded, 0);
+        xQueueSend(gnssCommandResultQueue, &event, 0);
+    }
+}
+
+void processNextGnssCommand()
+{
+    if (gnssCommandQueue == nullptr || gnssCommandResultSemaphore == nullptr) {
+        return;
+    }
+
+    QueuedGnssCommand command{};
+    if (xQueueReceive(gnssCommandQueue, &command, 0) != pdTRUE) {
+        return;
+    }
+
+    while (xSemaphoreTake(gnssCommandResultSemaphore, 0) == pdTRUE) {
+    }
+    portENTER_CRITICAL(&gnssCommandMux);
+    std::memcpy(expectedGnssCommandMac, command.roverMac,
+                sizeof(expectedGnssCommandMac));
+    expectedGnssCommandTransactionId = command.transactionId;
+    expectedGnssCommandId = command.commandId;
+    waitingForGnssCommandResult = true;
+    portEXIT_CRITICAL(&gnssCommandMux);
+
+    GnssCommandRequestPacket packet{};
+    packet.common.magic = RTCM_ESPNOW_MAGIC;
+    packet.common.version = RTCM_ESPNOW_VERSION;
+    packet.common.packetType = RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_REQUEST;
+    packet.networkId = ESPNOW_NETWORK_ID;
+    packet.transactionId = command.transactionId;
+    packet.surveyDurationSeconds = command.surveyDurationSeconds;
+    packet.commandId = command.commandId;
+    packet.targetPort = RTCM_ESPNOW_GNSS_PORT_COM2;
+    packet.authTag = rtcmEspNowPairingAuthTag(packet,
+                                              ESPNOW_PAIRING_KEY,
+                                              sizeof(ESPNOW_PAIRING_KEY));
+
+    bool resultReceived = false;
+    for (uint8_t attempt = 0;
+         attempt <= ESPNOW_GNSS_COMMAND_SEND_RETRY_COUNT && !resultReceived;
+         ++attempt) {
+        if (!sendControlPacket(command.roverMac,
+                               reinterpret_cast<const uint8_t*>(&packet),
+                               sizeof(packet))) {
+            Serial.printf("[BASE][GNSS_CMD][WARN] Radio send failed txn=%lu attempt=%u\n",
+                          static_cast<unsigned long>(command.transactionId),
+                          attempt + 1);
+            delay(20);
+            continue;
+        }
+        incrementStat(&BaseEspnowStats::gnssCommandSent);
+        Serial.printf("[BASE][GNSS_CMD] Sent action=%s txn=%lu rover=%s duration_s=%lu attempt=%u\n",
+                      gnssCommandName(command.commandId),
+                      static_cast<unsigned long>(command.transactionId),
+                      macToString(command.roverMac).c_str(),
+                      static_cast<unsigned long>(command.surveyDurationSeconds),
+                      attempt + 1);
+        resultReceived =
+            xSemaphoreTake(gnssCommandResultSemaphore,
+                           pdMS_TO_TICKS(ESPNOW_GNSS_COMMAND_RESULT_TIMEOUT_MS)) == pdTRUE;
+    }
+
+    portENTER_CRITICAL(&gnssCommandMux);
+    waitingForGnssCommandResult = false;
+    portEXIT_CRITICAL(&gnssCommandMux);
+    if (!resultReceived) {
+        incrementStat(&BaseEspnowStats::gnssCommandTimeouts);
+        queueLocalGnssCommandTimeout(command);
+        Serial.printf("[BASE][GNSS_CMD][ERROR] Result timeout txn=%lu rover=%s\n",
+                      static_cast<unsigned long>(command.transactionId),
+                      macToString(command.roverMac).c_str());
+    }
+}
 }
 
 bool setupEspNowBase()
@@ -825,8 +1029,14 @@ bool setupEspNowBase()
     sendCallbackSemaphore = xSemaphoreCreateBinary();
     frameAckSemaphore = xSemaphoreCreateBinary();
     espnowSendMutex = xSemaphoreCreateMutex();
+    gnssCommandResultSemaphore = xSemaphoreCreateBinary();
+    gnssCommandQueue = xQueueCreate(ESPNOW_GNSS_COMMAND_QUEUE_LENGTH,
+                                    sizeof(QueuedGnssCommand));
+    gnssCommandResultQueue = xQueueCreate(ESPNOW_GNSS_COMMAND_RESULT_QUEUE_LENGTH,
+                                          sizeof(BaseGnssCommandResultEvent));
     if (sendCallbackSemaphore == nullptr || frameAckSemaphore == nullptr ||
-        espnowSendMutex == nullptr) {
+        espnowSendMutex == nullptr || gnssCommandResultSemaphore == nullptr ||
+        gnssCommandQueue == nullptr || gnssCommandResultQueue == nullptr) {
         Serial.println("[BASE][ESP-NOW][ERROR] Failed to create semaphores");
         return false;
     }
@@ -957,6 +1167,7 @@ void baseEspNowLoop()
         sendPairDiscoveryIfDue();
         processPendingPairResponse();
     }
+    processNextGnssCommand();
 }
 
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length)
@@ -984,8 +1195,13 @@ bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length)
     const uint32_t currentSequence = frameSequence;
     const uint32_t sendStartedAt = millis();
     bool allPeersAcked = true;
+    size_t attemptedPeers = 0;
 
     for (size_t index = 0; index < peerCount; ++index) {
+        if (!peers[index].rtcmEnabled) {
+            continue;
+        }
+        ++attemptedPeers;
         if (!sendFrameToPeer(peers[index].mac, frame, length, currentSequence)) {
             allPeersAcked = false;
             Serial.printf("[BASE][ESP-NOW][ERROR] Drop seq=%lu for peer=%s without application ACK\n",
@@ -995,6 +1211,16 @@ bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length)
     }
 
     waitingForFrameAck = false;
+    if (attemptedPeers == 0) {
+        incrementStat(&BaseEspnowStats::framesDropped);
+        const uint32_t now = millis();
+        if (lastNoRtcmPeerWarningAtMs == 0 ||
+            now - lastNoRtcmPeerWarningAtMs >= HEALTH_INTERVAL) {
+            lastNoRtcmPeerWarningAtMs = now;
+            Serial.println("[BASE][ESP-NOW][WARN] Drop RTCM frame: no RTCM-enabled Rover peer");
+        }
+        return false;
+    }
     ++frameSequence;
     recordFrameSendDuration(millis() - sendStartedAt);
 
@@ -1036,4 +1262,87 @@ size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
     }
     portEXIT_CRITICAL(&llhMux);
     return count;
+}
+
+static BaseGnssCommandQueueResult queueFirstRoverGnssCommand(
+    uint8_t commandId,
+    uint32_t transactionId,
+    uint32_t surveyDurationSeconds,
+    uint8_t targetMac[6])
+{
+    const bool validArguments =
+        transactionId != 0 &&
+        ((commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN &&
+          surveyDurationSeconds >= RTCM_ESPNOW_GNSS_SURVEY_MIN_SECONDS &&
+          surveyDurationSeconds <= RTCM_ESPNOW_GNSS_SURVEY_MAX_SECONDS) ||
+         (commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER &&
+          surveyDurationSeconds == 0));
+    if (!validArguments) {
+        return BaseGnssCommandQueueResult::InvalidArgument;
+    }
+    if (gnssCommandQueue == nullptr) {
+        return BaseGnssCommandQueueResult::NotReady;
+    }
+
+    QueuedGnssCommand command{};
+    portENTER_CRITICAL(&peerMux);
+    if (roverPeerCount > 0) {
+        std::memcpy(command.roverMac, roverPeers[0].mac, sizeof(command.roverMac));
+    }
+    portEXIT_CRITICAL(&peerMux);
+    if (!macIsConfigured(command.roverMac)) {
+        return BaseGnssCommandQueueResult::NoPairedRover;
+    }
+    command.transactionId = transactionId;
+    command.surveyDurationSeconds = surveyDurationSeconds;
+    command.commandId = commandId;
+    if (xQueueSend(gnssCommandQueue, &command, 0) != pdTRUE) {
+        return BaseGnssCommandQueueResult::QueueFull;
+    }
+    if (targetMac != nullptr) {
+        std::memcpy(targetMac, command.roverMac, 6);
+    }
+    incrementStat(&BaseEspnowStats::gnssCommandQueued);
+    return BaseGnssCommandQueueResult::Queued;
+}
+
+BaseGnssCommandQueueResult baseEspNowQueueFirstRoverBaseSurveyIn(
+    uint32_t transactionId,
+    uint32_t surveyDurationSeconds,
+    uint8_t targetMac[6])
+{
+    return queueFirstRoverGnssCommand(
+        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN,
+        transactionId,
+        surveyDurationSeconds,
+        targetMac);
+}
+
+BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
+    uint32_t transactionId,
+    uint8_t targetMac[6])
+{
+    return queueFirstRoverGnssCommand(
+        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER,
+        transactionId,
+        0,
+        targetMac);
+}
+
+bool baseEspNowPopGnssCommandResult(BaseGnssCommandResultEvent& result)
+{
+    return gnssCommandResultQueue != nullptr &&
+           xQueueReceive(gnssCommandResultQueue, &result, 0) == pdTRUE;
+}
+
+const char* baseGnssCommandQueueResultToString(BaseGnssCommandQueueResult result)
+{
+    switch (result) {
+    case BaseGnssCommandQueueResult::Queued: return "queued";
+    case BaseGnssCommandQueueResult::InvalidArgument: return "invalid_argument";
+    case BaseGnssCommandQueueResult::NotReady: return "not_ready";
+    case BaseGnssCommandQueueResult::NoPairedRover: return "no_paired_rover";
+    case BaseGnssCommandQueueResult::QueueFull: return "queue_full";
+    default: return "unknown";
+    }
 }
