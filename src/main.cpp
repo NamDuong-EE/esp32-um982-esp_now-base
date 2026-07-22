@@ -33,6 +33,7 @@ struct BasePipelineStats {
     uint32_t queueHighWater;
     uint32_t lastQueueAgeMs;
     uint32_t maxQueueAgeMs;
+    uint32_t localFramesSuppressed;
 };
 
 QueueHandle_t rtcmFrameQueue = nullptr;
@@ -93,6 +94,13 @@ void enqueueRtcmFrame(const uint8_t* frame, size_t frameLength)
     envelope.receivedAtMs = millis();
     std::memcpy(envelope.data, frame, frameLength);
     recordValidFrame(envelope.messageId, envelope.receivedAtMs);
+
+    if (!baseEspNowShouldForwardLocalRtcm()) {
+        portENTER_CRITICAL(&pipelineStatsMux);
+        ++pipelineStats.localFramesSuppressed;
+        portEXIT_CRITICAL(&pipelineStatsMux);
+        return;
+    }
 
     if (xQueueSend(rtcmFrameQueue, &envelope, 0) != pdTRUE) {
         RtcmFrameEnvelope discarded{};
@@ -199,9 +207,40 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
 
 [[noreturn]] void taskRtcmSender(void*)
 {
+    uint32_t observedSourceEpoch = getBaseRtcmSourceSnapshot().epoch;
     while (true) {
         RtcmFrameEnvelope envelope{};
-        if (xQueueReceive(rtcmFrameQueue, &envelope, portMAX_DELAY) != pdTRUE) {
+        BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
+        if (source.epoch != observedSourceEpoch) {
+            observedSourceEpoch = source.epoch;
+            while (xQueueReceive(rtcmFrameQueue, &envelope, 0) == pdTRUE) {
+            }
+        }
+
+        bool haveFrame = false;
+        const bool fromTemp = source.state == BaseRtcmSourceState::TempActive;
+        if (fromTemp) {
+            BaseTempRtcmFrame tempFrame{};
+            if (baseEspNowPopTempRtcmFrame(tempFrame, pdMS_TO_TICKS(50))) {
+                envelope.length = tempFrame.length;
+                envelope.messageId = tempFrame.messageId;
+                envelope.receivedAtMs = tempFrame.receivedAtMs;
+                std::memcpy(envelope.data, tempFrame.data, tempFrame.length);
+                haveFrame = true;
+            }
+        } else {
+            haveFrame = xQueueReceive(rtcmFrameQueue,
+                                      &envelope,
+                                      pdMS_TO_TICKS(50)) == pdTRUE;
+        }
+        if (!haveFrame) {
+            continue;
+        }
+
+        const BaseRtcmSourceSnapshot sourceBeforeSend = getBaseRtcmSourceSnapshot();
+        if (sourceBeforeSend.epoch != observedSourceEpoch ||
+            (fromTemp && sourceBeforeSend.state != BaseRtcmSourceState::TempActive) ||
+            (!fromTemp && sourceBeforeSend.state == BaseRtcmSourceState::TempActive)) {
             continue;
         }
 
@@ -263,7 +302,7 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
         Serial.printf(
             "[BASE][HEALTH] period_ms=%lu uart_Bps=%.1f rtcm_fps=%.2f acked_fps=%.2f "
             "delivery=%.1f%% uart_available=%d queue=%u queue_hwm=%lu queue_drop=%lu "
-            "stale_drop=%lu queue_age_ms=%lu queue_age_max_ms=%lu uart_raw_bytes=%lu "
+            "stale_drop=%lu local_suppressed=%lu queue_age_ms=%lu queue_age_max_ms=%lu uart_raw_bytes=%lu "
             "rtcm_valid=%lu crc_error=%lu too_large=%lu frames_acked=%lu frames_dropped=%lu "
             "fragments_sent=%lu send_fail=%lu send_timeout=%lu frame_retry=%lu ack_timeout=%lu "
             "ack_rx=%lu ack_invalid=%lu frame_deadline=%lu task_send_ok=%lu task_send_fail=%lu "
@@ -271,6 +310,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "pair_auth_fail=%lu llh_rx=%lu llh_relayed=%lu llh_invalid=%lu "
             "llh_unknown=%lu llh_capacity_drop=%lu "
             "cmd_queued=%lu cmd_sent=%lu cmd_result=%lu cmd_timeout=%lu cmd_invalid=%lu "
+            "temp_frag_rx=%lu temp_frame_ok=%lu temp_invalid=%lu temp_queue_drop=%lu "
+            "temp_ack=%lu temp_ack_fail=%lu source=%s source_epoch=%lu source_switch=%lu "
+            "source_fallback=%lu peer_cooldown=%lu peer_skip=%lu peer_recovery=%lu "
             "send_ms=%lu send_max_ms=%lu free_heap=%u\n",
             static_cast<unsigned long>(periodMs),
             static_cast<double>(deltaRawBytes) / seconds,
@@ -282,6 +324,7 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(pipeline.queueHighWater),
             static_cast<unsigned long>(pipeline.queueDrops),
             static_cast<unsigned long>(pipeline.staleDrops),
+            static_cast<unsigned long>(pipeline.localFramesSuppressed),
             static_cast<unsigned long>(pipeline.lastQueueAgeMs),
             static_cast<unsigned long>(pipeline.maxQueueAgeMs),
             static_cast<unsigned long>(rawBytes),
@@ -317,6 +360,19 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(espnow.gnssCommandResults),
             static_cast<unsigned long>(espnow.gnssCommandTimeouts),
             static_cast<unsigned long>(espnow.gnssCommandInvalidResults),
+            static_cast<unsigned long>(espnow.tempFragmentsReceived),
+            static_cast<unsigned long>(espnow.tempFramesValid),
+            static_cast<unsigned long>(espnow.tempFramesInvalid),
+            static_cast<unsigned long>(espnow.tempQueueDrops),
+            static_cast<unsigned long>(espnow.tempAcksSent),
+            static_cast<unsigned long>(espnow.tempAckFailures),
+            baseRtcmSourceStateToString(getBaseRtcmSourceSnapshot().state),
+            static_cast<unsigned long>(getBaseRtcmSourceSnapshot().epoch),
+            static_cast<unsigned long>(espnow.sourceSwitches),
+            static_cast<unsigned long>(espnow.sourceFallbacks),
+            static_cast<unsigned long>(espnow.peerCooldownEvents),
+            static_cast<unsigned long>(espnow.peerCooldownSkips),
+            static_cast<unsigned long>(espnow.peerRecoveries),
             static_cast<unsigned long>(espnow.lastFrameSendMs),
             static_cast<unsigned long>(espnow.maxFrameSendMs),
             ESP.getFreeHeap());
@@ -416,15 +472,29 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                          status.relayMac[0], status.relayMac[1], status.relayMac[2],
                          status.relayMac[3], status.relayMac[4], status.relayMac[5]);
             }
+            char tempBaseMacText[18] = {};
+            if (status.usesTempBase) {
+                snprintf(tempBaseMacText, sizeof(tempBaseMacText),
+                         "%02X:%02X:%02X:%02X:%02X:%02X",
+                         status.tempBaseMac[0], status.tempBaseMac[1],
+                         status.tempBaseMac[2], status.tempBaseMac[3],
+                         status.tempBaseMac[4], status.tempBaseMac[5]);
+            }
             Serial.printf(
                 "[BASE][ROVER_LLH] mac=%02X:%02X:%02X:%02X:%02X:%02X seq=%lu "
-                "lat=%.7f lon=%.7f height_m=%.3f via=%s relay_mac=%s age_ms=%lu\n",
+                "lat=%.7f lon=%.7f height_m=%.3f fix_quality=%u "
+                "via=%s relay_mac=%s rtcm_source=%s temp_base_mac=%s "
+                "source_epoch=%lu age_ms=%lu\n",
                 status.mac[0], status.mac[1], status.mac[2],
                 status.mac[3], status.mac[4], status.mac[5],
                 static_cast<unsigned long>(status.sequence),
                 latitude, longitude, heightM,
+                static_cast<unsigned>(status.fixQuality),
                 status.viaRelay ? "relay" : "direct",
                 relayMacText,
+                status.usesTempBase ? "temp_base" : "local_base",
+                tempBaseMacText,
+                static_cast<unsigned long>(status.rtcmSourceEpoch),
                 static_cast<unsigned long>(millis() - status.receivedAtMs));
         }
     }

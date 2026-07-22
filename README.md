@@ -23,8 +23,9 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 
 ### Telemetry LLH Rover -> Base -> MQTT
 
-- Packet runtime `ROVER_LLH_STATUS` type 6 co kich thuoc 20 byte, dung `int32_t`: latitude/longitude nhan `10^7`, height MSL doi tu met sang millimetre.
-- Rover con gui type 6 toi Relay da pair. Relay them MAC Rover con va forward bang `RELAYED_ROVER_LLH_STATUS` type 7, 28 byte.
+- Packet runtime `ROVER_LLH_STATUS` type 6 co kich thuoc 21 byte, dung `int32_t`: latitude/longitude nhan `10^7`, height MSL doi tu met sang millimetre; `fixQuality` la 1 byte lay tu GGA (4 = RTK Fixed, 5 = RTK Float).
+- Rover con gui type 6 toi Relay da pair. Relay giu nguyen `fixQuality`, them MAC Rover con va forward bang `RELAYED_ROVER_LLH_STATUS` type 7, 28 byte.
+- Type 6 moi khong tuong thich voi packet LLH 20 byte cu; can nap Base, Relay va Rover cung phien ban.
 - Base chi chap nhan packet type 7 neu source radio la mot Relay/Rover da pair; danh tinh MQTT van la MAC Rover con nam trong packet.
 - Queue LLH cua Relay chi giu latest snapshot. Khi RTCM/TX dang ban, LLH cu co the bi ghi de hoac bo qua, khong tao backlog.
 - Packet LLH khong retry. Neu TX manager Rover dang ban boi pairing hoac RTCM ACK thi bo luot hien tai; packet moi se thu lai sau mot giay.
@@ -34,8 +35,8 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 - Base log snapshot moi va publish moi snapshot mot lan len topic MQTT rieng theo MAC Rover. Neu MQTT mat ket noi, Base khong tao backlog; sau khi reconnect chi snapshot moi nhat cua moi Rover duoc gui.
 
 ```text
-[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=12 lat=21.0734567 lon=105.8123456 height_m=12.345 age_ms=20
-[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=13 lat=21.0734567 lon=105.8123456 height_m=12.345 via=relay relay_mac=68:09:47:9D:33:70 age_ms=20
+[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=12 lat=21.0734567 lon=105.8123456 height_m=12.345 fix_quality=4 via=direct relay_mac= age_ms=20
+[BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=13 lat=21.0734567 lon=105.8123456 height_m=12.345 fix_quality=5 via=relay relay_mac=68:09:47:9D:33:70 age_ms=20
 [BASE][MQTT][LLH] Published topic=aitogy/base/rovers/582ABD71E4F0/llh seq=12 bytes=...
 ```
 
@@ -366,6 +367,8 @@ struct RtcmEspNowAck {
 
 Mỗi attempt gửi nguyên frame có deadline 1000 ms. Nếu thiếu ACK, Base retry nguyên frame một lần với cùng `streamId + frameSequence`. Rover nhận sequence đã hoàn thành sẽ ACK lại từ fragment đầu nhưng không ghi lặp RTCM vào UART. Chỉ ACK hợp lệ mới tăng `frames_acked`; hết retry mà không có ACK mới tăng `frames_dropped` và chuyển sequence.
 
+Để một Rover mất điện không chặn các Rover khác, Base theo dõi lỗi riêng từng peer. Sau 2 frame liên tiếp không có application ACK, chỉ peer đó vào cooldown 3000 ms; frame mới vẫn được gửi cho các peer còn khỏe. Hết cooldown, Base tự dùng frame kế tiếp làm probe: ACK thành công thì xóa lỗi và log `state=recovered`, thất bại thì vào cooldown lại. Thứ tự peer bắt đầu được xoay round-robin theo từng frame, vì vậy peer đang probe không luôn đứng trước cùng một Rover khỏe. Cooldown chỉ nằm trong RAM, không xóa pairing/NVS.
+
 ### Quy tắc phía Base
 
 1. Tìm preamble RTCM3 `0xD3`.
@@ -376,7 +379,7 @@ Mỗi attempt gửi nguyên frame có deadline 1000 ms. Nếu thiếu ACK, Base 
 6. Gửi fragment theo thứ tự tăng dần.
 7. Chỉ gửi fragment kế tiếp sau khi send callback của fragment trước trả về.
 8. Chờ ACK ứng dụng từ Rover sau khi gửi đủ frame; nếu thiếu ACK thì retry nguyên frame một lần.
-9. Tăng `frameSequence` sau khi frame được ACK hoặc bị bỏ sau toàn bộ retry.
+9. Cấp một `frameSequence` cho mỗi frame trước khi fan-out; mọi peer nhận cùng sequence. Peer đang cooldown được bỏ qua và sẽ chấp nhận sequence mới nhất khi probe lại.
 
 ## Kết nối Internet và MQTT
 
@@ -417,29 +420,68 @@ MQTT test dùng các topic:
 | Topic | Hướng | Nội dung |
 |---|---|---|
 | `aitogy/base/test/status` | Base publish retained | `online`; LWT ghi `offline` |
-| `aitogy/base/rovers/<MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height và source age |
+| `aitogy/base/rovers/<MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height, fix quality và source age |
 | `aitogy/base/test/command` | Base subscribe | Nhận lệnh điều khiển GNSS; V1 chỉ cho phép `switch_to_base_survey_in` |
 | `aitogy/base/test/command-result` | Base publish | Kết quả Rover đã ghi chuỗi lệnh xuống UM980 qua COM2 hoặc lỗi/timeout |
 
 Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/llh`:
 
 ```json
-{"rover_mac":"58:2A:BD:71:E4:F0","sequence":12,"latitude":21.0734567,"longitude":105.8123456,"height_m":12.345,"source_age_ms":20}
+{"rover_mac":"58:2A:BD:71:E4:F0","sequence":12,"latitude":21.0734567,"longitude":105.8123456,"height_m":12.345,"fix_quality":4,"via_relay":false,"relay_mac":"","rtcm_source":"local_base","temp_base_mac":null,"rtcm_source_epoch":1,"source_age_ms":20}
 ```
 
 Server có thể subscribe wildcard `aitogy/base/rovers/+/llh` để nhận LLH của tất cả Rover đã pair. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và LLH mới.
+
+### Kiến trúc RTCM hub với Temporary Base
+
+Kiến trúc chốt ngày 2026-07-22 và đã triển khai trong firmware Base/Rover:
+
+```text
+UM980 Temporary Base -> ESP32 Temporary Base -> ESP-NOW unicast -> Base gốc
+Base gốc -> ESP-NOW multi-unicast hiện tại -> các Rover/Relay còn lại
+```
+
+- Temporary Base chỉ gửi RTCM về MAC Base gốc, không nhận route map và không tự gửi trực tiếp tới các Rover còn lại.
+- Các Rover/Relay còn lại vẫn pair, nhận RTCM và trả ACK cho MAC Base gốc như hiện tại; không cần đổi `active_source_mac`.
+- Base gốc là RTCM hub. Khi nguồn local đang active, Base forward RTCM từ UM980 local. Khi Temporary Base đã sẵn sàng, Base chuyển atomically sang nguồn temp và chỉ forward RTCM nhận từ temp.
+- Trong trạng thái `TEMP_ACTIVE`, UM980 Base gốc vẫn tiếp tục tạo RTCM để làm hot standby. ESP32 Base gốc vẫn đọc/validate nhưng **không đưa RTCM local vào forwarding queue**, không tạo backlog và không phát RTCM local tới Rover.
+- Base không gửi frame forwarded ngược lại peer đang là Temporary Base. ACK hop `Temporary Base -> Base gốc` độc lập với ACK hop `Base gốc -> Rover/Relay`.
+- Trong `TEMP_PREPARING`, Base ACK frame upstream sau khi ghép đủ và CRC đúng để Temporary Base tiếp tục gửi các message dùng đánh giá readiness. Trong `TEMP_ACTIVE`, Base chỉ ACK sau khi frame đã vào queue forwarding; queue đầy thì không ACK để nguồn retry, không giữ correction cũ để phát muộn.
+- Khi mất RTCM temp quá timeout, Base bỏ queue temp, đổi lại nguồn local, tạo `streamId` mới và chỉ forward frame local mới nhất. Các Rover vẫn thấy cùng MAC Base gốc nên không cần handover phân tán.
+
+Trạng thái nguồn trên Base:
+
+```text
+LOCAL_ACTIVE -> TEMP_PREPARING -> TEMP_ACTIVE -> LOCAL_FALLBACK
+```
+
+`TEMP_PREPARING` không làm gián đoạn các Rover còn lại: Base vẫn forward RTCM local cho tới khi đã nhận RTCM temp hợp lệ. Firmware chỉ kích hoạt nguồn temp sau `duration_s + 3000 ms` guard và hai chu kỳ liên tiếp có đủ `1006`, `1074`, `1084`, `1094`, `1124`. Nếu preparation thất bại, Base trở lại `LOCAL_ACTIVE` mà không tăng epoch vì nguồn correction thực tế chưa đổi. Packet uplink dùng type `10 = TEMP_RTCM_DATA`; ACK độc lập dùng type `11 = TEMP_RTCM_ACK`. Uplink có stream/sequence riêng, còn Base tạo `streamId` downstream mới mỗi lần chuyển sang temp hoặc fallback về local.
+
+Temporary Base giữ queue 3 frame theo chính sách ưu tiên correction mới, gửi fragment tối đa 234 byte tới đúng MAC Base đã pair và retry nguyên frame một lần nếu thiếu ACK. Base có queue RX fragment 16 packet, reassembly timeout 1500 ms và queue forwarding temp 3 frame. Khi `TEMP_ACTIVE` không có frame temp hợp lệ trong 3500 ms, Base chuyển `LOCAL_FALLBACK`, xóa queue temp, đổi source epoch/stream và chỉ phát các frame local mới.
+
+Khi nhận LLH, Base chụp kèm nguồn RTCM active **ngay tại thời điểm lưu snapshot**, không đợi tới lúc MQTT publish. Payload MQTT hiện thêm:
+
+```json
+{"rover_mac":"68:09:47:9E:8C:08","sequence":42,"latitude":21.0734567,"longitude":105.8123456,"height_m":12.345,"fix_quality":4,"rtcm_source":"temp_base","temp_base_mac":"58:2A:BD:71:E4:F0","rtcm_source_epoch":7,"source_age_ms":20}
+```
+
+- `rtcm_source`: `local_base` hoặc `temp_base`.
+- `temp_base_mac`: MAC Temporary Base cấp correction cho snapshot; bằng `null` khi nguồn là Base local.
+- `rtcm_source_epoch`: tăng mỗi lần Base đổi nguồn RTCM, giúp server tách dữ liệu trước/sau handover.
+- Temporary Base đang active không gửi LLH với vai trò Rover. Snapshot Rover cũ còn chờ publish phải giữ source/epoch đã chụp, không bị gắn nhầm nguồn mới.
 
 ### Điều khiển UM980 chuyển giữa Rover và temporary Base - V1
 
 Publish JSON sau vào `aitogy/base/test/command`:
 
 ```json
-{"action":"switch_to_base_survey_in","duration_s":60,"transaction_id":123}
+{"action":"switch_to_base_survey_in","target_mac":"58:2A:BD:71:E4:F0","duration_s":60,"transaction_id":123}
 ```
 
 - `duration_s`: thời gian survey-in, hợp lệ từ 10 đến 86400 giây; mặc định 60 giây.
 - `transaction_id`: số khác 0 để đối chiếu request/result. Có thể bỏ qua để Base tự sinh.
-- V1 luôn chọn **Rover trực tiếp đầu tiên** trong danh sách peer đã pair; chưa hỗ trợ `target_mac`, Relay hoặc phát lệnh cho nhiều Rover.
+- `target_mac`: MAC của Rover trực tiếp đã pair, định dạng `XX:XX:XX:XX:XX:XX`; chữ hoa hoặc chữ thường đều được chấp nhận. Nếu bỏ trường này, Base giữ tương thích cũ và chọn Rover trực tiếp đầu tiên.
+- Base từ chối MAC sai định dạng, MAC broadcast/multicast/zero hoặc MAC không có trong danh sách pairing với log `invalid target_mac`/`target_not_paired`. Lệnh chưa hỗ trợ target là Rover con phía sau Relay hoặc phát đồng thời tới nhiều Rover.
 - Base đóng gói lệnh thành packet ESP-NOW unicast type `8`, có `network_id`, transaction ID và `auth_tag` từ pairing key. Rover trả packet result type `9` về đúng Base.
 - Rover chỉ chấp nhận semantic command trong allowlist, không nhận chuỗi UART tùy ý từ MQTT.
 
@@ -448,7 +490,7 @@ Rover khóa UART COM2 và ghi tuần tự 14 bước: `unlogall`, `mode base tim
 Để đưa temporary Base đầu tiên trở lại Rover, publish một transaction ID mới:
 
 ```json
-{"action":"switch_to_rover","transaction_id":124}
+{"action":"switch_to_rover","target_mac":"58:2A:BD:71:E4:F0","transaction_id":124}
 ```
 
 Rover ghi 4 bước: `unlogall`, `mode rover survey`, `gpgga com2 1`, `saveconfig`. Khi result thành công, Rover mở lại nhận RTCM/gửi LLH và Base bật lại RTCM tới peer đó. `duration_s` không dùng cho action này. Cú pháp `MODE ROVER` yêu cầu UM980 Build7923+ hoặc UM982 Build7650+ theo Commands Manual N4 của Unicore.
@@ -684,6 +726,8 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 22. [ ] Hoàn thiện mạch 4G, xác nhận GPIO/nguồn/PWRKEY/APN và kiểm tra environment `esp32u_base_4g_mqtt` trên SIM7600 thật.
 23. [x] Nhận LLH từ từng Rover, giữ snapshot mới nhất và publish lên topic MQTT phân theo MAC; không tạo backlog khi offline.
 24. [x] V1 nhận MQTT command và gửi ESP-NOW unicast tới Rover trực tiếp đầu tiên để cấu hình UM980 thành Base survey-in qua COM2; nhận result và dừng RTCM tới peer đã chuyển vai trò trong RAM.
+25. [x] Chốt kiến trúc Temporary Base gửi RTCM một hop về Base gốc; Base gốc làm hub và giữ RTCM local ở hot standby nhưng không forward khi nguồn temp active.
+26. [x] Triển khai upstream RTCM Temp -> Base, source state machine/fallback và gắn `temp_base_mac` + `rtcm_source_epoch` vào snapshot LLH/MQTT.
 
 ## Log mong đợi sau khi hoàn thiện
 
@@ -696,6 +740,9 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 [BASE][NETWORK] transport=wifi configured=yes
 [BASE][MQTT] Connected, rover_llh_filter=aitogy/base/rovers/+/llh
 [BASE][MQTT][LLH] Published topic=aitogy/base/rovers/.../llh seq=... bytes=...
+[BASE][RTCM_SOURCE] state=TEMP_PREPARING temp=... survey_s=60
+[BASE][RTCM_SOURCE] state=TEMP_ACTIVE temp=... epoch=2 streamId=...
+[BASE][RTCM_SOURCE] state=LOCAL_FALLBACK epoch=3 streamId=... reason=temp_rtcm_timeout
 [BASE][SETUP] Khoi dong hoan tat
 [BASE][HEALTH] rtcm_valid=..., frames_acked=..., fragments_sent=..., ack_timeout=..., queue_drop=..., stale_drop=...
 [BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 signal_dbm=...
@@ -772,3 +819,18 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm dependency ArduinoJson để parse command theo schema và allowlist; không chuyển tiếp raw UART command từ MQTT.
 - Build xác nhận sau khi thêm hai chiều: `esp32u_base_espnow` SUCCESS, RAM 48.632/327.680 byte (14,8%), Flash 788.793/1.310.720 byte (60,2%); `esp32u_base_4g_mqtt` SUCCESS, RAM 47.560 byte (14,5%), Flash 778.469 byte (59,4%). Chưa test MQTT/UM980 trên phần cứng trong lượt này.
 - Đã thêm action `switch_to_rover`: Base gửi command ID `2`, chờ application result rồi bật lại RTCM cho peer; `command_builder.py` có thêm `build_geotek_lte_unicore_rover_config()` với cùng chuỗi 4 lệnh COM2.
+
+### 2026-07-22
+
+- Đã thêm chọn Rover đích cho lệnh GNSS qua trường MQTT `target_mac`. Base parse MAC chặt chẽ, chỉ queue lệnh cho peer trực tiếp đã pair và trả lý do `target_not_paired` trong log khi MAC không thuộc NVS/runtime peer list; payload cũ không có `target_mac` vẫn chọn peer đầu tiên. Build xác nhận: `esp32u_base_espnow` SUCCESS, RAM 49.120 byte (15,0%), Flash 794.873 byte (60,6%); `esp32u_base_4g_mqtt` SUCCESS, RAM 48.048 byte (14,7%), Flash 784.525 byte (59,9%).
+- Da them `fixQuality` GGA vao packet LLH truc tiep/qua Relay, snapshot va log Base; MQTT chi them `fix_quality` dang so.
+- Build xac nhan: `esp32u_base_espnow` SUCCESS, RAM 48.752/327.680 byte (14,9%), Flash 789.205/1.310.720 byte (60,2%); `esp32u_base_4g_mqtt` SUCCESS, RAM 47.680 byte (14,6%), Flash 778.893 byte (59,4%).
+- Đã chốt thiết kế RTCM hub: Temporary Base chỉ uplink RTCM về Base gốc; Base gốc ngừng forward RTCM local khi temp active nhưng vẫn đọc local làm hot standby, sau đó multi-unicast correction temp tới các Rover/Relay còn lại.
+- Đã triển khai schema LLH/MQTT gồm `rtcm_source`, `temp_base_mac` và `rtcm_source_epoch`; nguồn được chụp lúc Base nhận LLH để không gắn sai khi handover xảy ra trước lúc publish.
+- Đã triển khai packet uplink type `10` và ACK type `11`, reassembly/CRC/duplicate ACK, ingress queue và forwarding queue độc lập cho hop Temporary Base -> Base gốc.
+- Đã triển khai state machine `LOCAL_ACTIVE -> TEMP_PREPARING -> TEMP_ACTIVE -> LOCAL_FALLBACK`: Base chỉ activate sau thời gian survey + guard và 2 chu kỳ đủ `1006/1074/1084/1094/1124`; mất RTCM temp 3500 ms thì tự fallback và tạo `streamId` downstream mới.
+- Trong `TEMP_ACTIVE`, RTCM local vẫn được đọc/validate/thống kê nhưng tăng `local_suppressed` và không vào queue phát. Sender chỉ lấy correction temp, bỏ queue cũ theo `source_epoch` và không gửi ngược lại peer Temporary Base đang bị disable RTCM downstream.
+- Snapshot LLH đã chụp `rtcm_source`, `temp_base_mac`, `rtcm_source_epoch` lúc nhận; MQTT publish đúng metadata đã chụp và dùng `null` cho `temp_base_mac` khi nguồn local.
+- Health Base đã thêm counter uplink/source: `temp_frag_rx`, `temp_frame_ok`, `temp_invalid`, `temp_queue_drop`, `temp_ack`, `temp_ack_fail`, `source`, `source_epoch`, `source_switch`, `source_fallback`.
+- Từ log thực tế có một peer mất ACK làm `stale_drop` tăng rất nhanh, đã thêm failure isolation từng Rover: ngưỡng 2 frame lỗi, cooldown/probe 3000 ms và round-robin điểm bắt đầu fan-out. Health thêm `peer_cooldown`, `peer_skip`, `peer_recovery`; log chuyển trạng thái dùng `[BASE][ESP-NOW][PEER]`.
+- Build xác nhận sau sửa peer isolation: `esp32u_base_espnow` SUCCESS, RAM 49.120/327.680 byte (15,0%), Flash 794.177/1.310.720 byte (60,6%); `esp32u_base_4g_mqtt` SUCCESS, RAM 48.048 byte (14,7%), Flash 783.813 byte (59,8%). Chưa kiểm thử lại tình huống ngắt/cấp nguồn Rover trên phần cứng trong lượt này.

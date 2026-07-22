@@ -13,8 +13,34 @@ struct BaseRoverLlhStatus {
     int32_t latitudeE7 = 0;
     int32_t longitudeE7 = 0;
     int32_t heightMm = 0;
+    uint8_t fixQuality = 0;
+    bool usesTempBase = false;
+    uint8_t tempBaseMac[6] = {};
+    uint32_t rtcmSourceEpoch = 0;
     uint32_t receivedAtMs = 0;
     bool valid = false;
+};
+
+enum class BaseRtcmSourceState : uint8_t {
+    LocalActive = 0,
+    TempPreparing,
+    TempActive,
+    LocalFallback,
+};
+
+struct BaseRtcmSourceSnapshot {
+    BaseRtcmSourceState state = BaseRtcmSourceState::LocalActive;
+    uint8_t tempBaseMac[6] = {};
+    uint32_t epoch = 0;
+    uint32_t lastTempFrameAtMs = 0;
+    uint8_t readyCycles = 0;
+};
+
+struct BaseTempRtcmFrame {
+    uint16_t length = 0;
+    uint16_t messageId = 0;
+    uint32_t receivedAtMs = 0;
+    uint8_t data[1029] = {};
 };
 
 enum class BaseGnssCommandQueueResult : uint8_t {
@@ -22,6 +48,7 @@ enum class BaseGnssCommandQueueResult : uint8_t {
     InvalidArgument,
     NotReady,
     NoPairedRover,
+    TargetNotPaired,
     QueueFull,
 };
 
@@ -66,12 +93,27 @@ struct BaseEspnowStats {
     uint32_t gnssCommandResults = 0;
     uint32_t gnssCommandTimeouts = 0;
     uint32_t gnssCommandInvalidResults = 0;
+    uint32_t tempFragmentsReceived = 0;
+    uint32_t tempFramesValid = 0;
+    uint32_t tempFramesInvalid = 0;
+    uint32_t tempQueueDrops = 0;
+    uint32_t tempAcksSent = 0;
+    uint32_t tempAckFailures = 0;
+    uint32_t sourceSwitches = 0;
+    uint32_t sourceFallbacks = 0;
+    uint32_t peerCooldownEvents = 0;
+    uint32_t peerCooldownSkips = 0;
+    uint32_t peerRecoveries = 0;
     bool pairingActive = false;
 };
 
 bool setupEspNowBase();
 void baseEspNowLoop();
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length);
+bool baseEspNowShouldForwardLocalRtcm();
+bool baseEspNowPopTempRtcmFrame(BaseTempRtcmFrame& frame, TickType_t waitTicks);
+BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot();
+const char* baseRtcmSourceStateToString(BaseRtcmSourceState state);
 BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
 size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
@@ -83,6 +125,15 @@ BaseGnssCommandQueueResult baseEspNowQueueFirstRoverBaseSurveyIn(
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
     uint32_t transactionId,
     uint8_t targetMac[6]);
+BaseGnssCommandQueueResult baseEspNowQueueRoverBaseSurveyIn(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
+    uint32_t surveyDurationSeconds,
+    uint8_t selectedTargetMac[6]);
+BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
+    uint8_t selectedTargetMac[6]);
 bool baseEspNowPopGnssCommandResult(BaseGnssCommandResultEvent& result);
 const char* baseGnssCommandQueueResultToString(BaseGnssCommandQueueResult result);
 

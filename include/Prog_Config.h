@@ -97,10 +97,19 @@ inline constexpr uint8_t ESPNOW_SEND_RETRY_COUNT = 2;
 inline constexpr uint32_t ESPNOW_FRAME_SEND_DEADLINE_MS = 1000;
 inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
 inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
+inline constexpr uint8_t ESPNOW_PEER_FAILURES_BEFORE_COOLDOWN = 2;
+inline constexpr uint32_t ESPNOW_PEER_FAILURE_COOLDOWN_MS = 3000;
 inline constexpr size_t ESPNOW_GNSS_COMMAND_QUEUE_LENGTH = 4;
 inline constexpr size_t ESPNOW_GNSS_COMMAND_RESULT_QUEUE_LENGTH = 4;
 inline constexpr uint32_t ESPNOW_GNSS_COMMAND_RESULT_TIMEOUT_MS = 10000;
 inline constexpr uint8_t ESPNOW_GNSS_COMMAND_SEND_RETRY_COUNT = 1;
+inline constexpr size_t TEMP_RTCM_RX_QUEUE_LENGTH = 16;
+inline constexpr size_t TEMP_RTCM_FRAME_QUEUE_LENGTH = 3;
+inline constexpr uint32_t TEMP_RTCM_REASSEMBLY_TIMEOUT_MS = 1500;
+inline constexpr uint32_t TEMP_RTCM_SOURCE_TIMEOUT_MS = 3500;
+inline constexpr uint32_t TEMP_RTCM_PREPARING_TIMEOUT_MS = 10000;
+inline constexpr uint32_t TEMP_RTCM_SURVEY_GUARD_MS = 3000;
+inline constexpr uint8_t TEMP_RTCM_READY_CYCLES = 2;
 
 // ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to
 // discover MAC addresses by broadcast, then switch back to unicast runtime.

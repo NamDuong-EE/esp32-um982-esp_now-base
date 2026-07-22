@@ -89,6 +89,39 @@ const char* gnssCommandAction(uint8_t commandId)
     }
 }
 
+int8_t hexNibble(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return static_cast<int8_t>(value - '0');
+    }
+    if (value >= 'A' && value <= 'F') {
+        return static_cast<int8_t>(value - 'A' + 10);
+    }
+    if (value >= 'a' && value <= 'f') {
+        return static_cast<int8_t>(value - 'a' + 10);
+    }
+    return -1;
+}
+
+bool parseUnicastMac(const char* text, uint8_t mac[6])
+{
+    if (text == nullptr || std::strlen(text) != 17) {
+        return false;
+    }
+    for (size_t index = 0; index < 6; ++index) {
+        const size_t offset = index * 3;
+        const int8_t high = hexNibble(text[offset]);
+        const int8_t low = hexNibble(text[offset + 1]);
+        if (high < 0 || low < 0 || (index < 5 && text[offset + 2] != ':')) {
+            return false;
+        }
+        mac[index] = static_cast<uint8_t>((high << 4) | low);
+    }
+    const bool allZero = mac[0] == 0 && mac[1] == 0 && mac[2] == 0 &&
+                         mac[3] == 0 && mac[4] == 0 && mac[5] == 0;
+    return !allZero && (mac[0] & 0x01U) == 0;
+}
+
 void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 {
     constexpr unsigned int maxLogLength = 160;
@@ -134,12 +167,27 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
                                          ? (document["duration_s"] |
                                             MQTT_DEFAULT_SURVEY_DURATION_SECONDS)
                                          : 0;
+    const JsonVariantConst targetMacValue = document["target_mac"];
+    const bool hasRequestedTarget = !targetMacValue.isNull();
+    uint8_t requestedTargetMac[6] = {};
+    if (hasRequestedTarget &&
+        (!targetMacValue.is<const char*>() ||
+         !parseUnicastMac(targetMacValue.as<const char*>(), requestedTargetMac))) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu invalid target_mac\n",
+                      static_cast<unsigned long>(transactionId));
+        return;
+    }
+
     uint8_t targetMac[6] = {};
     const BaseGnssCommandQueueResult queueResult = switchToBase
-        ? baseEspNowQueueFirstRoverBaseSurveyIn(transactionId,
-                                                durationSeconds,
-                                                targetMac)
-        : baseEspNowQueueFirstRoverMode(transactionId, targetMac);
+        ? baseEspNowQueueRoverBaseSurveyIn(hasRequestedTarget ? requestedTargetMac : nullptr,
+                                           transactionId,
+                                           durationSeconds,
+                                           targetMac)
+        : baseEspNowQueueRoverMode(hasRequestedTarget ? requestedTargetMac : nullptr,
+                                   transactionId,
+                                   targetMac);
     if (queueResult != BaseGnssCommandQueueResult::Queued) {
         incrementStat(&NetworkMqttStats::commandsRejected);
         Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu result=%s\n",
@@ -148,12 +196,13 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
         return;
     }
 
-    Serial.printf("[BASE][MQTT][GNSS_CMD] Queued txn=%lu action=%s duration_s=%lu first_rover=%02X:%02X:%02X:%02X:%02X:%02X\n",
+    Serial.printf("[BASE][MQTT][GNSS_CMD] Queued txn=%lu action=%s duration_s=%lu target=%02X:%02X:%02X:%02X:%02X:%02X selection=%s\n",
                   static_cast<unsigned long>(transactionId),
                   action,
                   static_cast<unsigned long>(durationSeconds),
                   targetMac[0], targetMac[1], targetMac[2],
-                  targetMac[3], targetMac[4], targetMac[5]);
+                  targetMac[3], targetMac[4], targetMac[5],
+                  hasRequestedTarget ? "mqtt" : "first_paired");
 }
 
 bool internetConnected()
@@ -309,7 +358,7 @@ void publishLatestRoverLlh(uint32_t now)
         state->lastAttemptAtMs = now;
 
         char topic[96] = {};
-        char payload[256] = {};
+        char payload[448] = {};
         char macText[18] = {};
         snprintf(macText,
                  sizeof(macText),
@@ -323,6 +372,17 @@ void publishLatestRoverLlh(uint32_t now)
                      "%02X:%02X:%02X:%02X:%02X:%02X",
                      status.relayMac[0], status.relayMac[1], status.relayMac[2],
                      status.relayMac[3], status.relayMac[4], status.relayMac[5]);
+        }
+        char tempBaseMacText[18] = {};
+        char tempBaseJson[24] = "null";
+        if (status.usesTempBase) {
+            snprintf(tempBaseMacText,
+                     sizeof(tempBaseMacText),
+                     "%02X:%02X:%02X:%02X:%02X:%02X",
+                     status.tempBaseMac[0], status.tempBaseMac[1],
+                     status.tempBaseMac[2], status.tempBaseMac[3],
+                     status.tempBaseMac[4], status.tempBaseMac[5]);
+            snprintf(tempBaseJson, sizeof(tempBaseJson), "\"%s\"", tempBaseMacText);
         }
         snprintf(topic,
                  sizeof(topic),
@@ -341,15 +401,22 @@ void publishLatestRoverLlh(uint32_t now)
                  sizeof(payload),
                  "{\"rover_mac\":\"%s\",\"sequence\":%lu,"
                  "\"latitude\":%.7f,\"longitude\":%.7f,"
-                 "\"height_m\":%.3f,\"via_relay\":%s,"
-                 "\"relay_mac\":\"%s\",\"source_age_ms\":%lu}",
+                 "\"height_m\":%.3f,\"fix_quality\":%u,"
+                 "\"via_relay\":%s,"
+                 "\"relay_mac\":\"%s\",\"rtcm_source\":\"%s\","
+                 "\"temp_base_mac\":%s,\"rtcm_source_epoch\":%lu,"
+                 "\"source_age_ms\":%lu}",
                  macText,
                  static_cast<unsigned long>(status.sequence),
                  latitude,
                  longitude,
                  heightM,
+                 static_cast<unsigned>(status.fixQuality),
                  status.viaRelay ? "true" : "false",
                  relayMacText,
+                 status.usesTempBase ? "temp_base" : "local_base",
+                 tempBaseJson,
+                 static_cast<unsigned long>(status.rtcmSourceEpoch),
                  static_cast<unsigned long>(now - status.receivedAtMs));
 
         if (mqtt.publish(topic, payload, false)) {
