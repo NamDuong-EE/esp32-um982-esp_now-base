@@ -5,14 +5,14 @@
 #include <cstdint>
 
 inline constexpr uint16_t RTCM_ESPNOW_MAGIC = 0x5452; // "RT" on little-endian wire.
-inline constexpr uint8_t RTCM_ESPNOW_VERSION = 1;
+inline constexpr uint8_t RTCM_ESPNOW_VERSION = 2;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_RTCM_DATA = 1;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_FRAME_ACK = 2;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_DISCOVERY = 3;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_RESPONSE = 4;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_PAIR_CONFIRM = 5;
-inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS = 6;
-inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS = 7;
+inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_ROVER_ECEF_STATUS = 6;
+inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_ECEF_STATUS = 7;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_REQUEST = 8;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_RESULT = 9;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_TEMP_RTCM_DATA = 10;
@@ -21,6 +21,8 @@ inline constexpr uint8_t RTCM_ESPNOW_ROLE_BASE = 1;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_ROVER = 2;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER = 2;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF = 3;
+inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK = 4;
+inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK = 5;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_PORT_COM2 = 2;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN = 1;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_STATUS_REJECTED = 2;
@@ -30,9 +32,9 @@ inline constexpr uint16_t RTCM_ESPNOW_GNSS_COMMAND_DETAIL_NONE = 0;
 inline constexpr uint16_t RTCM_ESPNOW_GNSS_COMMAND_DETAIL_INVALID_REQUEST = 1;
 inline constexpr uint16_t RTCM_ESPNOW_GNSS_COMMAND_DETAIL_QUEUE_FULL = 2;
 inline constexpr uint16_t RTCM_ESPNOW_GNSS_COMMAND_DETAIL_UART_WRITE = 3;
-inline constexpr double RTCM_ESPNOW_LLH_COORDINATE_SCALE = 10000000.0;
-inline constexpr double RTCM_ESPNOW_LLH_HEIGHT_SCALE = 1000.0;
-inline constexpr int64_t RTCM_ESPNOW_ECEF_MM_LIMIT = 7000000000LL;
+inline constexpr double RTCM_ESPNOW_ECEF_SCALE = 10000.0;
+inline constexpr int64_t RTCM_ESPNOW_ECEF_SCALED_LIMIT = 70000000000LL;
+inline constexpr uint32_t RTCM_ESPNOW_GNSS_MILLISECONDS_PER_DAY = 86400000UL;
 inline constexpr uint8_t RTCM_ESPNOW_ACK_STATUS_WRITTEN = 1;
 inline constexpr size_t RTCM_ESPNOW_MAX_PACKET_SIZE = 250;
 inline constexpr size_t RTCM_ESPNOW_MAX_FRAME_LENGTH = 1029;
@@ -66,35 +68,38 @@ struct RtcmEspNowAck {
     uint8_t reserved;
 };
 
-struct RoverLlhStatusPacket {
+struct RoverEcefStatusPacket {
     RtcmEspNowCommonHeader common;
     uint32_t sequence;
-    int32_t latitudeE7;
-    int32_t longitudeE7;
-    int32_t heightMm;
-    int32_t ellipsoidHeightMm;
+    uint32_t gnssTimeMsOfDay;
+    uint16_t correctionStreamId;
     uint8_t fixQuality;
+    uint8_t reserved;
+    int64_t ecefXScaled;
+    int64_t ecefYScaled;
+    int64_t ecefZScaled;
 };
 
-struct RelayedRoverLlhStatusPacket {
+struct RelayedRoverEcefStatusPacket {
     RtcmEspNowCommonHeader common;
     uint32_t sequence;
     uint8_t roverMac[6];
+    uint32_t gnssTimeMsOfDay;
+    uint16_t correctionStreamId;
     uint8_t fixQuality;
-    uint8_t reserved;
-    int32_t latitudeE7;
-    int32_t longitudeE7;
-    int32_t heightMm;
-    int32_t ellipsoidHeightMm;
+    uint8_t reserved[3];
+    int64_t ecefXScaled;
+    int64_t ecefYScaled;
+    int64_t ecefZScaled;
 };
 
 struct GnssCommandRequestPacket {
     RtcmEspNowCommonHeader common;
     uint32_t networkId;
     uint32_t transactionId;
-    int64_t ecefXmm;
-    int64_t ecefYmm;
-    int64_t ecefZmm;
+    int64_t ecefXScaled;
+    int64_t ecefYScaled;
+    int64_t ecefZScaled;
     uint8_t commandId;
     uint8_t targetPort;
     uint16_t reserved;
@@ -150,9 +155,10 @@ struct RtcmEspNowPairConfirm {
 static_assert(sizeof(RtcmEspNowCommonHeader) == 4, "RTCM ESP-NOW common header must be 4 bytes");
 static_assert(sizeof(RtcmEspNowHeader) == 16, "RTCM ESP-NOW header must be 16 bytes");
 static_assert(sizeof(RtcmEspNowAck) == 12, "RTCM ESP-NOW ACK must be 12 bytes");
-static_assert(sizeof(RoverLlhStatusPacket) == 25, "ROVER_LLH_STATUS must be 25 bytes");
-static_assert(sizeof(RelayedRoverLlhStatusPacket) == 32,
-              "RELAYED_ROVER_LLH_STATUS must be 32 bytes");
+static_assert(sizeof(RoverEcefStatusPacket) == 40,
+              "ROVER_ECEF_STATUS must be 40 bytes");
+static_assert(sizeof(RelayedRoverEcefStatusPacket) == 48,
+              "RELAYED_ROVER_ECEF_STATUS must be 48 bytes");
 static_assert(sizeof(GnssCommandRequestPacket) == 44,
               "GNSS_COMMAND_REQUEST must be 44 bytes");
 static_assert(sizeof(GnssCommandResultPacket) == 24,
@@ -257,20 +263,36 @@ inline bool rtcmEspNowValidatePairResponse(const RtcmEspNowPairResponse& packet,
            packet.authTag == rtcmEspNowPairingAuthTag(packet, pairingKey, pairingKeyLength);
 }
 
-inline bool rtcmEspNowValidateRoverLlhStatus(const RoverLlhStatusPacket& packet,
-                                             size_t receivedLength)
+inline bool rtcmEspNowValidEcef(int64_t x, int64_t y, int64_t z)
 {
-    return receivedLength == sizeof(RoverLlhStatusPacket) &&
+    return x >= -RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           x <= RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           y >= -RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           y <= RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           z >= -RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           z <= RTCM_ESPNOW_ECEF_SCALED_LIMIT &&
+           (x < -900000 || x > 900000);
+}
+
+inline bool rtcmEspNowValidateRoverEcefStatus(
+    const RoverEcefStatusPacket& packet,
+    size_t receivedLength)
+{
+    return receivedLength == sizeof(RoverEcefStatusPacket) &&
            packet.common.magic == RTCM_ESPNOW_MAGIC &&
            packet.common.version == RTCM_ESPNOW_VERSION &&
-           packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS &&
-           packet.latitudeE7 >= -900000000 && packet.latitudeE7 <= 900000000 &&
-           packet.longitudeE7 >= -1800000000 && packet.longitudeE7 <= 1800000000 &&
+           packet.common.packetType ==
+               RTCM_ESPNOW_PACKET_TYPE_ROVER_ECEF_STATUS &&
+           packet.gnssTimeMsOfDay <
+               RTCM_ESPNOW_GNSS_MILLISECONDS_PER_DAY &&
+           rtcmEspNowValidEcef(packet.ecefXScaled,
+                               packet.ecefYScaled,
+                               packet.ecefZScaled) &&
            packet.fixQuality <= 8;
 }
 
-inline bool rtcmEspNowValidateRelayedRoverLlhStatus(
-    const RelayedRoverLlhStatusPacket& packet,
+inline bool rtcmEspNowValidateRelayedRoverEcefStatus(
+    const RelayedRoverEcefStatusPacket& packet,
     size_t receivedLength)
 {
     bool macConfigured = false;
@@ -279,13 +301,17 @@ inline bool rtcmEspNowValidateRelayedRoverLlhStatus(
         macConfigured = macConfigured || octet != 0;
         macBroadcast = macBroadcast && octet == 0xFF;
     }
-    return receivedLength == sizeof(RelayedRoverLlhStatusPacket) &&
+    return receivedLength == sizeof(RelayedRoverEcefStatusPacket) &&
            packet.common.magic == RTCM_ESPNOW_MAGIC &&
            packet.common.version == RTCM_ESPNOW_VERSION &&
-           packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS &&
+           packet.common.packetType ==
+               RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_ECEF_STATUS &&
            macConfigured && !macBroadcast && (packet.roverMac[0] & 0x01U) == 0 &&
-           packet.latitudeE7 >= -900000000 && packet.latitudeE7 <= 900000000 &&
-           packet.longitudeE7 >= -1800000000 && packet.longitudeE7 <= 1800000000 &&
+           packet.gnssTimeMsOfDay <
+               RTCM_ESPNOW_GNSS_MILLISECONDS_PER_DAY &&
+           rtcmEspNowValidEcef(packet.ecefXScaled,
+                               packet.ecefYScaled,
+                               packet.ecefZScaled) &&
            packet.fixQuality <= 8;
 }
 
@@ -297,16 +323,22 @@ inline bool rtcmEspNowValidateGnssCommandRequest(
     size_t pairingKeyLength)
 {
     const bool validEcef =
-        packet.ecefXmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        packet.ecefXmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        packet.ecefYmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        packet.ecefYmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        packet.ecefZmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        packet.ecefZmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        (packet.ecefXmm < -90000 || packet.ecefXmm > 90000);
+        rtcmEspNowValidEcef(packet.ecefXScaled,
+                            packet.ecefYScaled,
+                            packet.ecefZScaled);
     const bool validCommandParameters =
         (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER &&
-         packet.ecefXmm == 0 && packet.ecefYmm == 0 && packet.ecefZmm == 0) ||
+         packet.ecefXScaled == 0 &&
+         packet.ecefYScaled == 0 &&
+         packet.ecefZScaled == 0) ||
+        (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK &&
+         packet.ecefXScaled == 0 &&
+         packet.ecefYScaled == 0 &&
+         packet.ecefZScaled == 0) ||
+        (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK &&
+         packet.ecefXScaled == 0 &&
+         packet.ecefYScaled == 0 &&
+         packet.ecefZScaled == 0) ||
         (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF &&
          validEcef);
     return receivedLength == sizeof(GnssCommandRequestPacket) &&
@@ -335,8 +367,11 @@ inline bool rtcmEspNowValidateGnssCommandResult(
            packet.common.packetType == RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_RESULT &&
            packet.networkId == expectedNetworkId &&
            packet.transactionId != 0 &&
-           (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF ||
-            packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER) &&
+           (packet.commandId ==
+                RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF ||
+            packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER ||
+            packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK ||
+            packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK) &&
            packet.status >= RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN &&
            packet.status <= RTCM_ESPNOW_GNSS_COMMAND_STATUS_BUSY &&
            packet.authTag == rtcmEspNowPairingAuthTag(packet,

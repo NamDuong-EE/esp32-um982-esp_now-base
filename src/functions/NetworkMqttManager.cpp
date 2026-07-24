@@ -8,6 +8,7 @@
 
 #include "Prog_Config.h"
 #include "RtcmEspNowProtocol.h"
+#include "functions/BaseGnssRoleController.h"
 #include "hardware/BaseEspnow_sender.h"
 
 #if CONNECT_USING_WIFI
@@ -44,7 +45,7 @@ struct PendingFixedBaseCommand {
 
 PendingFixedBaseCommand pendingFixedBaseCommand{};
 
-struct PublishedLlhState {
+struct PublishedEcefState {
     uint8_t mac[6] = {};
     uint32_t lastPublishedSequence = 0;
     uint32_t lastPublishedReceivedAtMs = 0;
@@ -54,7 +55,28 @@ struct PublishedLlhState {
     bool hasPublished = false;
 };
 
-PublishedLlhState publishedLlh[ESPNOW_MAX_LLH_SOURCES] = {};
+PublishedEcefState publishedEcef[ESPNOW_MAX_ECEF_SOURCES] = {};
+
+struct NetworkMqttWorkBuffers {
+    BaseRoverEcefStatus snapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
+    char topic[96] = {};
+    char payload[768] = {};
+    char commandPayload[448] = {};
+    char ecefJson[128] = {};
+    char correctionJson[128] = {};
+    char correctedJson[128] = {};
+    char rawX[32] = {};
+    char rawY[32] = {};
+    char rawZ[32] = {};
+    char deltaX[32] = {};
+    char deltaY[32] = {};
+    char deltaZ[32] = {};
+    char correctedX[32] = {};
+    char correctedY[32] = {};
+    char correctedZ[32] = {};
+};
+
+NetworkMqttWorkBuffers workBuffers{};
 #if CONNECT_USING_4G
 bool modemInitialized = false;
 #endif
@@ -91,10 +113,14 @@ bool credentialsConfigured()
 const char* gnssCommandAction(uint8_t commandId)
 {
     switch (commandId) {
-    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF:
-        return "switch_to_base_fixed_ecef";
+    case RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK:
+        return "rtk_reset";
+    case RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK:
+        return "rtk_resume";
     case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
         return "switch_to_rover";
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF:
+        return "switch_to_base_fixed_ecef";
     default:
         return "unknown";
     }
@@ -138,31 +164,21 @@ bool macEquals(const uint8_t left[6], const uint8_t right[6])
     return left != nullptr && right != nullptr && std::memcmp(left, right, 6) == 0;
 }
 
-void geodeticToEcef(double latitudeDegrees,
-                    double longitudeDegrees,
-                    double ellipsoidHeightM,
-                    double ecefM[3])
+void formatEcefScaled(int64_t value, char* destination, size_t capacity)
 {
-    constexpr double reWgs84 = 6378137.0;
-    constexpr double feWgs84 = 1.0 / 298.257223563;
-    constexpr double degreesToRadians = 0.017453292519943295769;
-    const double latitude = latitudeDegrees * degreesToRadians;
-    const double longitude = longitudeDegrees * degreesToRadians;
-    const double sinLatitude = std::sin(latitude);
-    const double cosLatitude = std::cos(latitude);
-    const double sinLongitude = std::sin(longitude);
-    const double cosLongitude = std::cos(longitude);
-    const double eccentricitySquared = feWgs84 * (2.0 - feWgs84);
-    const double primeVerticalRadius =
-        reWgs84 / std::sqrt(1.0 - eccentricitySquared *
-                                     sinLatitude * sinLatitude);
-
-    ecefM[0] = (primeVerticalRadius + ellipsoidHeightM) *
-               cosLatitude * cosLongitude;
-    ecefM[1] = (primeVerticalRadius + ellipsoidHeightM) *
-               cosLatitude * sinLongitude;
-    ecefM[2] = (primeVerticalRadius * (1.0 - eccentricitySquared) +
-                ellipsoidHeightM) * sinLatitude;
+    if (destination == nullptr || capacity == 0) {
+        return;
+    }
+    const bool negative = value < 0;
+    const uint64_t magnitude = negative
+                                   ? static_cast<uint64_t>(-(value + 1)) + 1U
+                                   : static_cast<uint64_t>(value);
+    snprintf(destination,
+             capacity,
+             "%s%llu.%04llu",
+             negative ? "-" : "",
+             static_cast<unsigned long long>(magnitude / 10000ULL),
+             static_cast<unsigned long long>(magnitude % 10000ULL));
 }
 
 void processPendingFixedBaseCommand(uint32_t now)
@@ -187,46 +203,32 @@ void processPendingFixedBaseCommand(uint32_t now)
         return;
     }
 
-    BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
     const size_t count =
-        baseEspNowCopyLatestRoverLlh(snapshots, ESPNOW_MAX_LLH_SOURCES);
-    const BaseRoverLlhStatus* selected = nullptr;
+        baseEspNowCopyLatestRoverEcef(workBuffers.snapshots,
+                                     ESPNOW_MAX_ECEF_SOURCES);
+    const BaseRoverEcefStatus* selected = nullptr;
     for (size_t index = 0; index < count; ++index) {
-        if (snapshots[index].valid && !snapshots[index].viaRelay &&
-            macEquals(snapshots[index].mac,
+        if (workBuffers.snapshots[index].valid &&
+            !workBuffers.snapshots[index].viaRelay &&
+            macEquals(workBuffers.snapshots[index].mac,
                       pendingFixedBaseCommand.targetMac)) {
-            selected = &snapshots[index];
+            selected = &workBuffers.snapshots[index];
             break;
         }
     }
     if (selected == nullptr || selected->fixQuality != 4 ||
-        now - selected->receivedAtMs > TEMP_BASE_FIXED_LLH_MAX_AGE_MS) {
+        now - selected->receivedAtMs > TEMP_BASE_FIXED_ECEF_MAX_AGE_MS) {
         return;
     }
-
-    const double latitude =
-        static_cast<double>(selected->latitudeE7) /
-        RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-    const double longitude =
-        static_cast<double>(selected->longitudeE7) /
-        RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-    const double ellipsoidHeightM =
-        static_cast<double>(selected->ellipsoidHeightMm) /
-        RTCM_ESPNOW_LLH_HEIGHT_SCALE;
-    double ecefM[3] = {};
-    geodeticToEcef(latitude, longitude, ellipsoidHeightM, ecefM);
-    const int64_t ecefXmm = static_cast<int64_t>(std::llround(ecefM[0] * 1000.0));
-    const int64_t ecefYmm = static_cast<int64_t>(std::llround(ecefM[1] * 1000.0));
-    const int64_t ecefZmm = static_cast<int64_t>(std::llround(ecefM[2] * 1000.0));
 
     uint8_t selectedMac[6] = {};
     const BaseGnssCommandQueueResult queueResult =
         baseEspNowQueueRoverBaseFixedEcef(
             pendingFixedBaseCommand.targetMac,
             pendingFixedBaseCommand.transactionId,
-            ecefXmm,
-            ecefYmm,
-            ecefZmm,
+            selected->ecefXScaled,
+            selected->ecefYScaled,
+            selected->ecefZScaled,
             selectedMac);
     if (queueResult == BaseGnssCommandQueueResult::QueueFull ||
         queueResult == BaseGnssCommandQueueResult::NotReady) {
@@ -242,14 +244,22 @@ void processPendingFixedBaseCommand(uint32_t now)
         return;
     }
 
+    formatEcefScaled(selected->ecefXScaled, workBuffers.rawX,
+                     sizeof(workBuffers.rawX));
+    formatEcefScaled(selected->ecefYScaled, workBuffers.rawY,
+                     sizeof(workBuffers.rawY));
+    formatEcefScaled(selected->ecefZScaled, workBuffers.rawZ,
+                     sizeof(workBuffers.rawZ));
     Serial.printf("[BASE][ECEF] txn=%lu target=%02X:%02X:%02X:%02X:%02X:%02X "
-                  "llh=(%.7f,%.7f,%.3f) ecef_m=(%.4f,%.4f,%.4f)\n",
+                  "gnss_ms=%lu ecef_m=(%s,%s,%s)\n",
                   static_cast<unsigned long>(
                       pendingFixedBaseCommand.transactionId),
                   selectedMac[0], selectedMac[1], selectedMac[2],
                   selectedMac[3], selectedMac[4], selectedMac[5],
-                  latitude, longitude, ellipsoidHeightM,
-                  ecefM[0], ecefM[1], ecefM[2]);
+                  static_cast<unsigned long>(selected->gnssTimeMsOfDay),
+                  workBuffers.rawX,
+                  workBuffers.rawY,
+                  workBuffers.rawZ);
     pendingFixedBaseCommand = {};
 }
 
@@ -310,6 +320,13 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
             incrementStat(&NetworkMqttStats::commandsRejected);
             Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
                           "target_mac required for fixed ECEF\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        if (!baseGnssRoleHasReference()) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "result=local_rtcm1006_reference_unavailable\n",
                           static_cast<unsigned long>(transactionId));
             return;
         }
@@ -492,14 +509,14 @@ void connectMqtt()
     incrementStat(&NetworkMqttStats::mqttConnects);
     mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
     mqtt.subscribe(MQTT_TOPIC_COMMAND);
-    Serial.printf("[BASE][MQTT] Connected, rover_llh_filter=%s/+/llh\n",
-                  MQTT_TOPIC_ROVER_LLH_PREFIX);
+    Serial.printf("[BASE][MQTT] Connected, rover_ecef_filter=%s/+/ecef\n",
+                  MQTT_TOPIC_ROVER_ECEF_PREFIX);
 }
 
-PublishedLlhState* publishedStateFor(const uint8_t* mac)
+PublishedEcefState* publishedStateFor(const uint8_t* mac)
 {
-    PublishedLlhState* freeSlot = nullptr;
-    for (PublishedLlhState& state : publishedLlh) {
+    PublishedEcefState* freeSlot = nullptr;
+    for (PublishedEcefState& state : publishedEcef) {
         if (state.assigned && std::memcmp(state.mac, mac, sizeof(state.mac)) == 0) {
             return &state;
         }
@@ -514,19 +531,29 @@ PublishedLlhState* publishedStateFor(const uint8_t* mac)
     return freeSlot;
 }
 
-void publishLatestRoverLlh(uint32_t now)
+uint32_t gnssTimeDeltaMs(uint32_t left, uint32_t right)
 {
-    BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
-    const size_t count = baseEspNowCopyLatestRoverLlh(
-        snapshots, ESPNOW_MAX_LLH_SOURCES);
+    const uint32_t direct = left > right ? left - right : right - left;
+    const uint32_t wrapped =
+        RTCM_ESPNOW_GNSS_MILLISECONDS_PER_DAY - direct;
+    return direct < wrapped ? direct : wrapped;
+}
+
+void publishLatestRoverEcef(uint32_t now)
+{
+    const size_t count = baseEspNowCopyLatestRoverEcef(
+        workBuffers.snapshots, ESPNOW_MAX_ECEF_SOURCES);
+    const BaseEcefCorrectionSnapshot correction =
+        getBaseEcefCorrectionSnapshot();
+    const uint16_t activeStreamId = getBaseEspNowStreamId();
 
     for (size_t index = 0; index < count; ++index) {
-        const BaseRoverLlhStatus& status = snapshots[index];
+        const BaseRoverEcefStatus& status = workBuffers.snapshots[index];
         if (!status.valid) {
             continue;
         }
 
-        PublishedLlhState* state = publishedStateFor(status.mac);
+        PublishedEcefState* state = publishedStateFor(status.mac);
         if (state == nullptr ||
             (state->hasPublished &&
              state->lastPublishedSequence == status.sequence &&
@@ -534,14 +561,12 @@ void publishLatestRoverLlh(uint32_t now)
             continue;
         }
         if (state->lastAttemptedReceivedAtMs == status.receivedAtMs &&
-            now - state->lastAttemptAtMs < MQTT_LLH_RETRY_INTERVAL_MS) {
+            now - state->lastAttemptAtMs < MQTT_ECEF_RETRY_INTERVAL_MS) {
             continue;
         }
         state->lastAttemptedReceivedAtMs = status.receivedAtMs;
         state->lastAttemptAtMs = now;
 
-        char topic[96] = {};
-        char payload[448] = {};
         char macText[18] = {};
         snprintf(macText,
                  sizeof(macText),
@@ -567,47 +592,104 @@ void publishLatestRoverLlh(uint32_t now)
                      status.tempBaseMac[4], status.tempBaseMac[5]);
             snprintf(tempBaseJson, sizeof(tempBaseJson), "\"%s\"", tempBaseMacText);
         }
-        snprintf(topic,
-                 sizeof(topic),
-                 "%s/%02X%02X%02X%02X%02X%02X/llh",
-                 MQTT_TOPIC_ROVER_LLH_PREFIX,
+        snprintf(workBuffers.topic,
+                 sizeof(workBuffers.topic),
+                 "%s/%02X%02X%02X%02X%02X%02X/ecef",
+                 MQTT_TOPIC_ROVER_ECEF_PREFIX,
                  status.mac[0], status.mac[1], status.mac[2],
                  status.mac[3], status.mac[4], status.mac[5]);
 
-        const double latitude =
-            static_cast<double>(status.latitudeE7) / RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-        const double longitude =
-            static_cast<double>(status.longitudeE7) / RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-        const double heightM =
-            static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
-        const double ellipsoidHeightM =
-            static_cast<double>(status.ellipsoidHeightMm) /
-            RTCM_ESPNOW_LLH_HEIGHT_SCALE;
-        snprintf(payload,
-                 sizeof(payload),
+        const bool correctionValid =
+            correction.correctionValid &&
+            status.fixQuality == 4 &&
+            status.usesTempBase &&
+            !macEquals(status.mac, status.tempBaseMac) &&
+            status.correctionStreamId == activeStreamId &&
+            gnssTimeDeltaMs(status.gnssTimeMsOfDay,
+                            correction.gnssTimeMsOfDay) <=
+                BASE_ECEF_CORRECTION_MAX_TIME_DELTA_MS;
+        snprintf(workBuffers.correctionJson,
+                 sizeof(workBuffers.correctionJson),
+                 "null");
+        snprintf(workBuffers.correctedJson,
+                 sizeof(workBuffers.correctedJson),
+                 "null");
+        formatEcefScaled(status.ecefXScaled,
+                         workBuffers.rawX,
+                         sizeof(workBuffers.rawX));
+        formatEcefScaled(status.ecefYScaled,
+                         workBuffers.rawY,
+                         sizeof(workBuffers.rawY));
+        formatEcefScaled(status.ecefZScaled,
+                         workBuffers.rawZ,
+                         sizeof(workBuffers.rawZ));
+        if (correctionValid) {
+            formatEcefScaled(correction.deltaXScaled,
+                             workBuffers.deltaX,
+                             sizeof(workBuffers.deltaX));
+            formatEcefScaled(correction.deltaYScaled,
+                             workBuffers.deltaY,
+                             sizeof(workBuffers.deltaY));
+            formatEcefScaled(correction.deltaZScaled,
+                             workBuffers.deltaZ,
+                             sizeof(workBuffers.deltaZ));
+            formatEcefScaled(status.ecefXScaled + correction.deltaXScaled,
+                             workBuffers.correctedX,
+                             sizeof(workBuffers.correctedX));
+            formatEcefScaled(status.ecefYScaled + correction.deltaYScaled,
+                             workBuffers.correctedY,
+                             sizeof(workBuffers.correctedY));
+            formatEcefScaled(status.ecefZScaled + correction.deltaZScaled,
+                             workBuffers.correctedZ,
+                             sizeof(workBuffers.correctedZ));
+            snprintf(workBuffers.correctionJson,
+                     sizeof(workBuffers.correctionJson),
+                     "{\"dx\":%s,\"dy\":%s,\"dz\":%s}",
+                     workBuffers.deltaX,
+                     workBuffers.deltaY,
+                     workBuffers.deltaZ);
+            snprintf(workBuffers.correctedJson,
+                     sizeof(workBuffers.correctedJson),
+                     "{\"x\":%s,\"y\":%s,\"z\":%s}",
+                     workBuffers.correctedX,
+                     workBuffers.correctedY,
+                     workBuffers.correctedZ);
+        }
+        snprintf(workBuffers.payload,
+                 sizeof(workBuffers.payload),
                  "{\"rover_mac\":\"%s\",\"sequence\":%lu,"
-                 "\"latitude\":%.7f,\"longitude\":%.7f,"
-                 "\"height_m\":%.3f,\"ellipsoid_height_m\":%.3f,"
-                 "\"fix_quality\":%u,"
+                 "\"gnss_time_ms\":%lu,\"fix_quality\":%u,"
+                 "\"ecef_raw_m\":{\"x\":%s,\"y\":%s,\"z\":%s},"
+                 "\"correction_valid\":%s,\"correction_ecef_m\":%s,"
+                 "\"ecef_corrected_m\":%s,"
                  "\"via_relay\":%s,"
                  "\"relay_mac\":\"%s\",\"rtcm_source\":\"%s\","
                  "\"temp_base_mac\":%s,\"rtcm_source_epoch\":%lu,"
-                 "\"source_age_ms\":%lu}",
+                 "\"correction_stream_id\":%u,\"source_age_ms\":%lu,"
+                 "\"correction_age_ms\":%lu}",
                  macText,
                  static_cast<unsigned long>(status.sequence),
-                 latitude,
-                 longitude,
-                 heightM,
-                 ellipsoidHeightM,
+                 static_cast<unsigned long>(status.gnssTimeMsOfDay),
                  static_cast<unsigned>(status.fixQuality),
+                 workBuffers.rawX,
+                 workBuffers.rawY,
+                 workBuffers.rawZ,
+                 correctionValid ? "true" : "false",
+                 workBuffers.correctionJson,
+                 workBuffers.correctedJson,
                  status.viaRelay ? "true" : "false",
                  relayMacText,
                  status.usesTempBase ? "temp_base" : "local_base",
                  tempBaseJson,
                  static_cast<unsigned long>(status.rtcmSourceEpoch),
-                 static_cast<unsigned long>(now - status.receivedAtMs));
+                 static_cast<unsigned>(status.correctionStreamId),
+                 static_cast<unsigned long>(now - status.receivedAtMs),
+                 correction.observationValid
+                     ? static_cast<unsigned long>(
+                           now - correction.observedAtMs)
+                     : 0UL);
 
-        if (mqtt.publish(topic, payload, false)) {
+        if (mqtt.publish(workBuffers.topic, workBuffers.payload, false)) {
             state->lastPublishedSequence = status.sequence;
             state->lastPublishedReceivedAtMs = status.receivedAtMs;
             state->hasPublished = true;
@@ -615,13 +697,16 @@ void publishLatestRoverLlh(uint32_t now)
             ++stats.llhPublished;
             stats.lastLlhPublishedAtMs = now;
             portEXIT_CRITICAL(&statsMux);
-            Serial.printf("[BASE][MQTT][LLH] Published topic=%s seq=%lu bytes=%u\n",
-                          topic,
+            Serial.printf("[BASE][MQTT][ECEF] Published topic=%s seq=%lu "
+                          "corrected=%u bytes=%u\n",
+                          workBuffers.topic,
                           static_cast<unsigned long>(status.sequence),
-                          static_cast<unsigned>(strlen(payload)));
+                          correctionValid ? 1U : 0U,
+                          static_cast<unsigned>(strlen(workBuffers.payload)));
         } else {
             incrementStat(&NetworkMqttStats::llhPublishFailures);
-            Serial.printf("[BASE][MQTT][LLH][WARN] Publish failed mac=%s seq=%lu\n",
+            Serial.printf("[BASE][MQTT][ECEF][WARN] Publish failed mac=%s "
+                          "seq=%lu\n",
                           macText,
                           static_cast<unsigned long>(status.sequence));
         }
@@ -667,19 +752,27 @@ void publishGnssCommandResult(uint32_t now)
              pendingGnssCommandResult.roverMac[3],
              pendingGnssCommandResult.roverMac[4],
              pendingGnssCommandResult.roverMac[5]);
-    char ecefJson[128] = "null";
+    snprintf(workBuffers.ecefJson, sizeof(workBuffers.ecefJson), "null");
     if (pendingGnssCommandResult.commandId ==
         RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF) {
-        snprintf(ecefJson,
-                 sizeof(ecefJson),
-                 "{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f}",
-                 static_cast<double>(pendingGnssCommandResult.ecefXmm) / 1000.0,
-                 static_cast<double>(pendingGnssCommandResult.ecefYmm) / 1000.0,
-                 static_cast<double>(pendingGnssCommandResult.ecefZmm) / 1000.0);
+        formatEcefScaled(pendingGnssCommandResult.ecefXScaled,
+                         workBuffers.rawX,
+                         sizeof(workBuffers.rawX));
+        formatEcefScaled(pendingGnssCommandResult.ecefYScaled,
+                         workBuffers.rawY,
+                         sizeof(workBuffers.rawY));
+        formatEcefScaled(pendingGnssCommandResult.ecefZScaled,
+                         workBuffers.rawZ,
+                         sizeof(workBuffers.rawZ));
+        snprintf(workBuffers.ecefJson,
+                 sizeof(workBuffers.ecefJson),
+                 "{\"x\":%s,\"y\":%s,\"z\":%s}",
+                 workBuffers.rawX,
+                 workBuffers.rawY,
+                 workBuffers.rawZ);
     }
-    char resultPayload[448] = {};
-    snprintf(resultPayload,
-             sizeof(resultPayload),
+    snprintf(workBuffers.commandPayload,
+             sizeof(workBuffers.commandPayload),
              "{\"transaction_id\":%lu,\"target_mac\":\"%s\","
              "\"action\":\"%s\",\"status\":\"%s\","
              "\"completed_step\":%u,\"total_steps\":%u,"
@@ -691,10 +784,12 @@ void publishGnssCommandResult(uint32_t now)
              pendingGnssCommandResult.completedStep,
              pendingGnssCommandResult.totalSteps,
              pendingGnssCommandResult.detailCode,
-             ecefJson,
+             workBuffers.ecefJson,
              static_cast<unsigned long>(now - pendingGnssCommandResult.receivedAtMs));
 
-    if (!mqtt.publish(MQTT_TOPIC_COMMAND_RESULT, resultPayload, false)) {
+    if (!mqtt.publish(MQTT_TOPIC_COMMAND_RESULT,
+                      workBuffers.commandPayload,
+                      false)) {
         incrementStat(&NetworkMqttStats::commandResultPublishFailures);
         return;
     }
@@ -729,6 +824,12 @@ void setupNetworkMqtt()
 
 void networkMqttLoop()
 {
+    const uint32_t stackHighWaterBytes =
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    portENTER_CRITICAL(&statsMux);
+    stats.stackHighWaterBytes = stackHighWaterBytes;
+    portEXIT_CRITICAL(&statsMux);
+
     processPendingFixedBaseCommand(millis());
     const NetworkMqttStats snapshot = getNetworkMqttStats();
     if (!snapshot.configured) {
@@ -797,7 +898,7 @@ void networkMqttLoop()
     mqtt.loop();
     if (mqtt.connected()) {
         publishGnssCommandResult(now);
-        publishLatestRoverLlh(now);
+        publishLatestRoverEcef(now);
     }
 }
 

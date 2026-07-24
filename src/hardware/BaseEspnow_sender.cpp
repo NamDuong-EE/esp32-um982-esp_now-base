@@ -17,6 +17,13 @@
 #include "RtcmEspNowProtocol.h"
 #include "functions/Rtcm_Frame_Reader.h"
 
+void beginResetCohort();
+void observeResetCohortStatus(const uint8_t* roverMac,
+                              uint8_t fixQuality,
+                              uint32_t receivedAtMs);
+void markResetBranchAcked(const uint8_t* branchMac);
+void progressResetCohort(uint32_t now);
+
 namespace {
 struct RoverPeer {
     uint8_t mac[6];
@@ -29,9 +36,9 @@ struct RoverPeer {
 struct QueuedGnssCommand {
     uint8_t roverMac[6];
     uint32_t transactionId;
-    int64_t ecefXmm;
-    int64_t ecefYmm;
-    int64_t ecefZmm;
+    int64_t ecefXScaled;
+    int64_t ecefYScaled;
+    int64_t ecefZScaled;
     uint8_t commandId;
 };
 
@@ -52,15 +59,31 @@ struct TempRtcmReassemblyState {
     uint8_t frame[RTCM_ESPNOW_MAX_FRAME_LENGTH];
 };
 
+struct ResetCohortEntry {
+    uint8_t roverMac[6];
+    uint8_t branchMac[6];
+    uint32_t baselineReceivedAtMs;
+    uint32_t nonRtkObservedAtMs;
+};
+
+struct ResetCohortBranch {
+    uint8_t mac[6];
+    uint32_t transactionId;
+    uint32_t ackedAtMs;
+    bool commandQueued;
+    bool commandAcked;
+};
+
 BaseEspnowStats stats;
 RoverPeer roverPeers[ESPNOW_MAX_PAIRED_ROVERS] = {};
-BaseRoverLlhStatus latestRoverLlh[ESPNOW_MAX_LLH_SOURCES] = {};
+BaseRoverEcefStatus latestRoverEcef[ESPNOW_MAX_ECEF_SOURCES] = {};
 size_t roverPeerCount = 0;
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE peerMux = portMUX_INITIALIZER_UNLOCKED;
-portMUX_TYPE llhMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE ecefMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE pairingMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE sourceMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE resetMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t streamId = 0;
 uint32_t frameSequence = 0;
 volatile bool lastSendSucceeded = false;
@@ -81,16 +104,24 @@ volatile bool waitingForGnssCommandResult = false;
 uint8_t expectedGnssCommandMac[6] = {};
 uint32_t expectedGnssCommandTransactionId = 0;
 uint8_t expectedGnssCommandId = 0;
-int64_t expectedGnssCommandEcefXmm = 0;
-int64_t expectedGnssCommandEcefYmm = 0;
-int64_t expectedGnssCommandEcefZmm = 0;
+int64_t expectedGnssCommandEcefXScaled = 0;
+int64_t expectedGnssCommandEcefYScaled = 0;
+int64_t expectedGnssCommandEcefZScaled = 0;
 uint32_t lastNoRtcmPeerWarningAtMs = 0;
 size_t nextPeerStartIndex = 0;
 
 BaseRtcmSourceSnapshot rtcmSource{};
 uint32_t tempFixedReadyAtMs = 0;
+uint32_t tempPreparingStartedAtMs = 0;
 uint8_t tempCycleMsmMask = 0;
 bool tempCycleStarted = false;
+bool resetCohortRequested = false;
+ResetCohortEntry resetCohort[ESPNOW_MAX_ECEF_SOURCES] = {};
+ResetCohortBranch resetBranches[ESPNOW_MAX_PAIRED_ROVERS] = {};
+BaseRoverEcefStatus resetCohortSnapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
+size_t resetCohortCount = 0;
+size_t resetBranchCount = 0;
+uint32_t resetGateStartedAtMs = 0;
 
 constexpr uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -223,9 +254,11 @@ void beginTempPreparing(const uint8_t* mac)
     std::memcpy(rtcmSource.tempBaseMac, mac, sizeof(rtcmSource.tempBaseMac));
     rtcmSource.lastTempFrameAtMs = 0;
     rtcmSource.readyCycles = 0;
+    tempPreparingStartedAtMs = now;
     tempFixedReadyAtMs = now + TEMP_RTCM_FIXED_GUARD_MS;
     tempCycleMsmMask = 0;
     tempCycleStarted = false;
+    resetCohortRequested = false;
     portEXIT_CRITICAL(&sourceMux);
     if (tempRtcmFrameQueue != nullptr) {
         xQueueReset(tempRtcmFrameQueue);
@@ -245,18 +278,24 @@ void switchToLocalFallback(const char* reason)
     uint16_t activeStreamId = 0;
     portENTER_CRITICAL(&sourceMux);
     fallback = rtcmSource.state == BaseRtcmSourceState::TempActive;
-    preparationCanceled = rtcmSource.state == BaseRtcmSourceState::TempPreparing;
+    preparationCanceled =
+        rtcmSource.state == BaseRtcmSourceState::TempPreparing ||
+        rtcmSource.state == BaseRtcmSourceState::TempResetting;
     if (fallback) {
         rtcmSource.state = BaseRtcmSourceState::LocalFallback;
         ++rtcmSource.epoch;
         rtcmSource.lastTempFrameAtMs = 0;
         rtcmSource.readyCycles = 0;
+        tempPreparingStartedAtMs = 0;
+        resetCohortRequested = false;
         rotateDownstreamStreamLocked();
     } else if (preparationCanceled) {
         rtcmSource.state = BaseRtcmSourceState::LocalActive;
         std::memset(rtcmSource.tempBaseMac, 0, sizeof(rtcmSource.tempBaseMac));
         rtcmSource.lastTempFrameAtMs = 0;
         rtcmSource.readyCycles = 0;
+        tempPreparingStartedAtMs = 0;
+        resetCohortRequested = false;
     }
     epoch = rtcmSource.epoch;
     activeStreamId = streamId;
@@ -288,12 +327,14 @@ void activateTempSource()
     uint32_t epoch = 0;
     uint16_t newId = 0;
     portENTER_CRITICAL(&sourceMux);
-    if (rtcmSource.state != BaseRtcmSourceState::TempPreparing) {
+    if (rtcmSource.state != BaseRtcmSourceState::TempResetting) {
         portEXIT_CRITICAL(&sourceMux);
         return;
     }
     rtcmSource.state = BaseRtcmSourceState::TempActive;
     ++rtcmSource.epoch;
+    tempPreparingStartedAtMs = 0;
+    resetCohortRequested = false;
     rotateDownstreamStreamLocked();
     std::memcpy(mac, rtcmSource.tempBaseMac, sizeof(mac));
     epoch = rtcmSource.epoch;
@@ -319,7 +360,6 @@ uint8_t msmBitForMessage(uint16_t messageId)
 
 void updateTempReadiness(uint16_t messageId, uint32_t now)
 {
-    bool shouldActivate = false;
     portENTER_CRITICAL(&sourceMux);
     if (rtcmSource.state == BaseRtcmSourceState::TempPreparing &&
         static_cast<int32_t>(now - tempFixedReadyAtMs) >= 0) {
@@ -336,12 +376,11 @@ void updateTempReadiness(uint16_t messageId, uint32_t now)
         } else if (tempCycleStarted) {
             tempCycleMsmMask |= msmBitForMessage(messageId);
         }
-        shouldActivate = rtcmSource.readyCycles >= TEMP_RTCM_READY_CYCLES;
+        if (rtcmSource.readyCycles >= TEMP_RTCM_READY_CYCLES) {
+            resetCohortRequested = true;
+        }
     }
     portEXIT_CRITICAL(&sourceMux);
-    if (shouldActivate) {
-        activateTempSource();
-    }
 }
 
 void makeRoverMacKey(size_t index, char* buffer, size_t bufferSize)
@@ -443,40 +482,42 @@ bool findRoverPeerIndex(const uint8_t* mac, size_t& selectedIndex)
     return found;
 }
 
-bool storeLatestRoverLlh(const uint8_t* roverMac,
-                         const uint8_t* relayMac,
-                         bool viaRelay,
-                         uint32_t sequence,
-                         int32_t latitudeE7,
-                         int32_t longitudeE7,
-                         int32_t heightMm,
-                         int32_t ellipsoidHeightMm,
-                         uint8_t fixQuality)
+bool storeLatestRoverEcef(const uint8_t* roverMac,
+                          const uint8_t* relayMac,
+                          bool viaRelay,
+                          uint32_t sequence,
+                          uint32_t gnssTimeMsOfDay,
+                          uint16_t correctionStreamId,
+                          int64_t ecefXScaled,
+                          int64_t ecefYScaled,
+                          int64_t ecefZScaled,
+                          uint8_t fixQuality)
 {
     const uint32_t receivedAtMs = millis();
     const BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
-    size_t selectedIndex = ESPNOW_MAX_LLH_SOURCES;
-    size_t freeIndex = ESPNOW_MAX_LLH_SOURCES;
-    portENTER_CRITICAL(&llhMux);
-    for (size_t index = 0; index < ESPNOW_MAX_LLH_SOURCES; ++index) {
-        if (latestRoverLlh[index].valid &&
-            macEquals(latestRoverLlh[index].mac, roverMac)) {
+    size_t selectedIndex = ESPNOW_MAX_ECEF_SOURCES;
+    size_t freeIndex = ESPNOW_MAX_ECEF_SOURCES;
+    portENTER_CRITICAL(&ecefMux);
+    for (size_t index = 0; index < ESPNOW_MAX_ECEF_SOURCES; ++index) {
+        if (latestRoverEcef[index].valid &&
+            macEquals(latestRoverEcef[index].mac, roverMac)) {
             selectedIndex = index;
             break;
         }
-        if (!latestRoverLlh[index].valid && freeIndex == ESPNOW_MAX_LLH_SOURCES) {
+        if (!latestRoverEcef[index].valid &&
+            freeIndex == ESPNOW_MAX_ECEF_SOURCES) {
             freeIndex = index;
         }
     }
-    if (selectedIndex == ESPNOW_MAX_LLH_SOURCES) {
+    if (selectedIndex == ESPNOW_MAX_ECEF_SOURCES) {
         selectedIndex = freeIndex;
     }
-    if (selectedIndex == ESPNOW_MAX_LLH_SOURCES) {
-        portEXIT_CRITICAL(&llhMux);
+    if (selectedIndex == ESPNOW_MAX_ECEF_SOURCES) {
+        portEXIT_CRITICAL(&ecefMux);
         return false;
     }
 
-    BaseRoverLlhStatus& latest = latestRoverLlh[selectedIndex];
+    BaseRoverEcefStatus& latest = latestRoverEcef[selectedIndex];
     std::memcpy(latest.mac, roverMac, sizeof(latest.mac));
     if (viaRelay && relayMac != nullptr) {
         std::memcpy(latest.relayMac, relayMac, sizeof(latest.relayMac));
@@ -485,13 +526,21 @@ bool storeLatestRoverLlh(const uint8_t* roverMac,
     }
     latest.viaRelay = viaRelay;
     latest.sequence = sequence;
-    latest.latitudeE7 = latitudeE7;
-    latest.longitudeE7 = longitudeE7;
-    latest.heightMm = heightMm;
-    latest.ellipsoidHeightMm = ellipsoidHeightMm;
+    latest.gnssTimeMsOfDay = gnssTimeMsOfDay;
+    latest.correctionStreamId = correctionStreamId;
+    latest.ecefXScaled = ecefXScaled;
+    latest.ecefYScaled = ecefYScaled;
+    latest.ecefZScaled = ecefZScaled;
     latest.fixQuality = fixQuality;
+    latest.rtcmSourceState = source.state;
     latest.usesTempBase = source.state == BaseRtcmSourceState::TempActive;
-    if (latest.usesTempBase) {
+    latest.hasSelectedTempBase =
+        (source.state == BaseRtcmSourceState::TempPreparing ||
+         source.state == BaseRtcmSourceState::TempResetting ||
+         source.state == BaseRtcmSourceState::TempActive ||
+         source.state == BaseRtcmSourceState::LocalFallback) &&
+        macIsConfigured(source.tempBaseMac);
+    if (latest.hasSelectedTempBase) {
         std::memcpy(latest.tempBaseMac,
                     source.tempBaseMac,
                     sizeof(latest.tempBaseMac));
@@ -501,7 +550,8 @@ bool storeLatestRoverLlh(const uint8_t* roverMac,
     latest.rtcmSourceEpoch = source.epoch;
     latest.receivedAtMs = receivedAtMs;
     latest.valid = true;
-    portEXIT_CRITICAL(&llhMux);
+    portEXIT_CRITICAL(&ecefMux);
+    observeResetCohortStatus(roverMac, fixQuality, receivedAtMs);
     return true;
 }
 
@@ -694,6 +744,7 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
         bool expectedSource = false;
         portENTER_CRITICAL(&sourceMux);
         expectedSource = (rtcmSource.state == BaseRtcmSourceState::TempPreparing ||
+                          rtcmSource.state == BaseRtcmSourceState::TempResetting ||
                           rtcmSource.state == BaseRtcmSourceState::TempActive) &&
                          macEquals(packet.sourceMac, rtcmSource.tempBaseMac);
         portEXIT_CRITICAL(&sourceMux);
@@ -767,7 +818,9 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
         sourceSnapshot = rtcmSource;
         portEXIT_CRITICAL(&sourceMux);
 
-        bool accepted = sourceSnapshot.state == BaseRtcmSourceState::TempPreparing;
+        bool accepted =
+            sourceSnapshot.state == BaseRtcmSourceState::TempPreparing ||
+            sourceSnapshot.state == BaseRtcmSourceState::TempResetting;
         if (sourceSnapshot.state == BaseRtcmSourceState::TempActive) {
             BaseTempRtcmFrame output{};
             output.length = reassembly.frameLength;
@@ -801,6 +854,10 @@ const char* gnssCommandName(uint8_t commandId)
         return "switch_to_base_fixed_ecef";
     case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
         return "switch_to_rover";
+    case RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK:
+        return "rtk_reset";
+    case RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK:
+        return "rtk_resume";
     default:
         return "unknown";
     }
@@ -916,6 +973,7 @@ void queueTempRtcmFragment(const uint8_t* sourceMac, const uint8_t* data, int le
     bool expectedSource = false;
     portENTER_CRITICAL(&sourceMux);
     expectedSource = (rtcmSource.state == BaseRtcmSourceState::TempPreparing ||
+                      rtcmSource.state == BaseRtcmSourceState::TempResetting ||
                       rtcmSource.state == BaseRtcmSourceState::TempActive) &&
                      macEquals(sourceMac, rtcmSource.tempBaseMac);
     portEXIT_CRITICAL(&sourceMux);
@@ -967,14 +1025,14 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         return;
     }
 
-    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_LLH_STATUS) {
-        if (length != static_cast<int>(sizeof(RoverLlhStatusPacket))) {
+    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_ROVER_ECEF_STATUS) {
+        if (length != static_cast<int>(sizeof(RoverEcefStatusPacket))) {
             incrementStat(&BaseEspnowStats::llhStatusInvalid);
             return;
         }
-        RoverLlhStatusPacket packet{};
+        RoverEcefStatusPacket packet{};
         std::memcpy(&packet, data, sizeof(packet));
-        if (!rtcmEspNowValidateRoverLlhStatus(packet, sizeof(packet))) {
+        if (!rtcmEspNowValidateRoverEcefStatus(packet, sizeof(packet))) {
             incrementStat(&BaseEspnowStats::llhStatusInvalid);
             return;
         }
@@ -984,13 +1042,14 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
             incrementStat(&BaseEspnowStats::llhStatusUnknownSource);
             return;
         }
-        if (!storeLatestRoverLlh(sourceMac, nullptr, false,
-                                 packet.sequence,
-                                 packet.latitudeE7,
-                                 packet.longitudeE7,
-                                 packet.heightMm,
-                                 packet.ellipsoidHeightMm,
-                                 packet.fixQuality)) {
+        if (!storeLatestRoverEcef(sourceMac, nullptr, false,
+                                  packet.sequence,
+                                  packet.gnssTimeMsOfDay,
+                                  packet.correctionStreamId,
+                                  packet.ecefXScaled,
+                                  packet.ecefYScaled,
+                                  packet.ecefZScaled,
+                                  packet.fixQuality)) {
             incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
             return;
         }
@@ -998,14 +1057,16 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         return;
     }
 
-    if (common.packetType == RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_LLH_STATUS) {
-        if (length != static_cast<int>(sizeof(RelayedRoverLlhStatusPacket))) {
+    if (common.packetType ==
+        RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_ECEF_STATUS) {
+        if (length != static_cast<int>(sizeof(RelayedRoverEcefStatusPacket))) {
             incrementStat(&BaseEspnowStats::llhStatusInvalid);
             return;
         }
-        RelayedRoverLlhStatusPacket packet{};
+        RelayedRoverEcefStatusPacket packet{};
         std::memcpy(&packet, data, sizeof(packet));
-        if (!rtcmEspNowValidateRelayedRoverLlhStatus(packet, sizeof(packet))) {
+        if (!rtcmEspNowValidateRelayedRoverEcefStatus(packet,
+                                                      sizeof(packet))) {
             incrementStat(&BaseEspnowStats::llhStatusInvalid);
             return;
         }
@@ -1014,13 +1075,14 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
             incrementStat(&BaseEspnowStats::llhStatusUnknownSource);
             return;
         }
-        if (!storeLatestRoverLlh(packet.roverMac, sourceMac, true,
-                                 packet.sequence,
-                                 packet.latitudeE7,
-                                 packet.longitudeE7,
-                                 packet.heightMm,
-                                 packet.ellipsoidHeightMm,
-                                 packet.fixQuality)) {
+        if (!storeLatestRoverEcef(packet.roverMac, sourceMac, true,
+                                  packet.sequence,
+                                  packet.gnssTimeMsOfDay,
+                                  packet.correctionStreamId,
+                                  packet.ecefXScaled,
+                                  packet.ecefYScaled,
+                                  packet.ecefZScaled,
+                                  packet.fixQuality)) {
             incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
             return;
         }
@@ -1067,9 +1129,9 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         event.completedStep = packet.completedStep;
         event.totalSteps = packet.totalSteps;
         event.detailCode = packet.detailCode;
-        event.ecefXmm = expectedGnssCommandEcefXmm;
-        event.ecefYmm = expectedGnssCommandEcefYmm;
-        event.ecefZmm = expectedGnssCommandEcefZmm;
+        event.ecefXScaled = expectedGnssCommandEcefXScaled;
+        event.ecefYScaled = expectedGnssCommandEcefYScaled;
+        event.ecefZScaled = expectedGnssCommandEcefZScaled;
         event.receivedAtMs = millis();
         if (gnssCommandResultQueue != nullptr &&
             xQueueSend(gnssCommandResultQueue, &event, 0) != pdTRUE) {
@@ -1079,8 +1141,12 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         }
         incrementStat(&BaseEspnowStats::gnssCommandResults);
         if (packet.status == RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN) {
+            if (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK) {
+                markResetBranchAcked(sourceMac);
+            }
             const bool enableRtcm =
-                packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER;
+                packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER ||
+                packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK;
             setRoverRtcmEnabled(sourceMac, enableRtcm);
             if (packet.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER) {
                 switchToLocalFallback("temp_base_returned_to_rover");
@@ -1429,9 +1495,9 @@ void queueLocalGnssCommandTimeout(const QueuedGnssCommand& command)
     std::memcpy(event.roverMac, command.roverMac, sizeof(event.roverMac));
     event.transactionId = command.transactionId;
     event.commandId = command.commandId;
-    event.ecefXmm = command.ecefXmm;
-    event.ecefYmm = command.ecefYmm;
-    event.ecefZmm = command.ecefZmm;
+    event.ecefXScaled = command.ecefXScaled;
+    event.ecefYScaled = command.ecefYScaled;
+    event.ecefZScaled = command.ecefZScaled;
     event.receivedAtMs = millis();
     event.responseTimedOut = true;
     if (gnssCommandResultQueue != nullptr &&
@@ -1460,9 +1526,9 @@ void processNextGnssCommand()
                 sizeof(expectedGnssCommandMac));
     expectedGnssCommandTransactionId = command.transactionId;
     expectedGnssCommandId = command.commandId;
-    expectedGnssCommandEcefXmm = command.ecefXmm;
-    expectedGnssCommandEcefYmm = command.ecefYmm;
-    expectedGnssCommandEcefZmm = command.ecefZmm;
+    expectedGnssCommandEcefXScaled = command.ecefXScaled;
+    expectedGnssCommandEcefYScaled = command.ecefYScaled;
+    expectedGnssCommandEcefZScaled = command.ecefZScaled;
     waitingForGnssCommandResult = true;
     portEXIT_CRITICAL(&gnssCommandMux);
 
@@ -1472,9 +1538,9 @@ void processNextGnssCommand()
     packet.common.packetType = RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_REQUEST;
     packet.networkId = ESPNOW_NETWORK_ID;
     packet.transactionId = command.transactionId;
-    packet.ecefXmm = command.ecefXmm;
-    packet.ecefYmm = command.ecefYmm;
-    packet.ecefZmm = command.ecefZmm;
+    packet.ecefXScaled = command.ecefXScaled;
+    packet.ecefYScaled = command.ecefYScaled;
+    packet.ecefZScaled = command.ecefZScaled;
     packet.commandId = command.commandId;
     packet.targetPort = RTCM_ESPNOW_GNSS_PORT_COM2;
     packet.authTag = rtcmEspNowPairingAuthTag(packet,
@@ -1504,9 +1570,12 @@ void processNextGnssCommand()
                       gnssCommandName(command.commandId),
                       static_cast<unsigned long>(command.transactionId),
                       macToString(command.roverMac).c_str(),
-                      static_cast<double>(command.ecefXmm) / 1000.0,
-                      static_cast<double>(command.ecefYmm) / 1000.0,
-                      static_cast<double>(command.ecefZmm) / 1000.0,
+                      static_cast<double>(command.ecefXScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE,
+                      static_cast<double>(command.ecefYScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE,
+                      static_cast<double>(command.ecefZScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE,
                       attempt + 1);
         resultReceived =
             xSemaphoreTake(gnssCommandResultSemaphore,
@@ -1634,7 +1703,7 @@ bool setupEspNowBase()
 
     if (xTaskCreatePinnedToCore(tempRtcmReceiveTask,
                                 "Temp RTCM RX",
-                                6144,
+                                TEMP_RTCM_RX_TASK_STACK_BYTES,
                                 nullptr,
                                 4,
                                 nullptr,
@@ -1660,22 +1729,31 @@ bool setupEspNowBase()
 
 void baseEspNowLoop()
 {
+    bool shouldBeginReset = false;
+    portENTER_CRITICAL(&sourceMux);
+    shouldBeginReset = resetCohortRequested;
+    resetCohortRequested = false;
+    portEXIT_CRITICAL(&sourceMux);
+    if (shouldBeginReset) {
+        beginResetCohort();
+    }
+
     const uint32_t sourceNow = millis();
+    progressResetCohort(sourceNow);
     BaseRtcmSourceSnapshot sourceSnapshot{};
-    uint32_t fixedReadyAt = 0;
+    uint32_t preparingStartedAt = 0;
     portENTER_CRITICAL(&sourceMux);
     sourceSnapshot = rtcmSource;
-    fixedReadyAt = tempFixedReadyAtMs;
+    preparingStartedAt = tempPreparingStartedAtMs;
     portEXIT_CRITICAL(&sourceMux);
     if (sourceSnapshot.state == BaseRtcmSourceState::TempActive &&
         sourceSnapshot.lastTempFrameAtMs != 0 &&
         sourceNow - sourceSnapshot.lastTempFrameAtMs > TEMP_RTCM_SOURCE_TIMEOUT_MS) {
         switchToLocalFallback("temp_rtcm_timeout");
     } else if (sourceSnapshot.state == BaseRtcmSourceState::TempPreparing &&
-               static_cast<int32_t>(sourceNow - fixedReadyAt) >= 0 &&
-               (sourceSnapshot.lastTempFrameAtMs == 0 ||
-                sourceNow - sourceSnapshot.lastTempFrameAtMs >
-                    TEMP_RTCM_PREPARING_TIMEOUT_MS)) {
+               preparingStartedAt != 0 &&
+               sourceNow - preparingStartedAt >
+                   TEMP_RTCM_PREPARING_TIMEOUT_MS) {
         switchToLocalFallback("temp_not_ready");
     }
 
@@ -1748,9 +1826,19 @@ bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length)
     size_t attemptedPeers = 0;
     const size_t startIndex = nextPeerStartIndex % peerCount;
     nextPeerStartIndex = (startIndex + 1) % peerCount;
+    const BaseRtcmSourceSnapshot sourceSnapshot =
+        getBaseRtcmSourceSnapshot();
+    const bool hasSelectedTemp =
+        sourceSnapshot.state == BaseRtcmSourceState::TempPreparing ||
+        sourceSnapshot.state == BaseRtcmSourceState::TempResetting ||
+        sourceSnapshot.state == BaseRtcmSourceState::TempActive;
 
     for (size_t offset = 0; offset < peerCount; ++offset) {
         const size_t index = (startIndex + offset) % peerCount;
+        if (hasSelectedTemp &&
+            macEquals(peers[index].mac, sourceSnapshot.tempBaseMac)) {
+            continue;
+        }
         if (!peers[index].rtcmEnabled) {
             continue;
         }
@@ -1815,7 +1903,9 @@ uint16_t getBaseEspNowStreamId()
 bool baseEspNowShouldForwardLocalRtcm()
 {
     portENTER_CRITICAL(&sourceMux);
-    const bool forward = rtcmSource.state != BaseRtcmSourceState::TempActive;
+    const bool forward =
+        rtcmSource.state != BaseRtcmSourceState::TempResetting &&
+        rtcmSource.state != BaseRtcmSourceState::TempActive;
     portEXIT_CRITICAL(&sourceMux);
     return forward;
 }
@@ -1839,26 +1929,27 @@ const char* baseRtcmSourceStateToString(BaseRtcmSourceState state)
     switch (state) {
     case BaseRtcmSourceState::LocalActive: return "LOCAL_ACTIVE";
     case BaseRtcmSourceState::TempPreparing: return "TEMP_PREPARING";
+    case BaseRtcmSourceState::TempResetting: return "TEMP_RESETTING";
     case BaseRtcmSourceState::TempActive: return "TEMP_ACTIVE";
     case BaseRtcmSourceState::LocalFallback: return "LOCAL_FALLBACK";
     default: return "UNKNOWN";
     }
 }
 
-size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
-                                    size_t capacity)
+size_t baseEspNowCopyLatestRoverEcef(BaseRoverEcefStatus* destination,
+                                     size_t capacity)
 {
     if (destination == nullptr || capacity == 0) {
         return 0;
     }
-    const size_t count = ESPNOW_MAX_LLH_SOURCES < capacity
-                             ? ESPNOW_MAX_LLH_SOURCES
+    const size_t count = ESPNOW_MAX_ECEF_SOURCES < capacity
+                             ? ESPNOW_MAX_ECEF_SOURCES
                              : capacity;
-    portENTER_CRITICAL(&llhMux);
+    portENTER_CRITICAL(&ecefMux);
     for (size_t index = 0; index < count; ++index) {
-        destination[index] = latestRoverLlh[index];
+        destination[index] = latestRoverEcef[index];
     }
-    portEXIT_CRITICAL(&llhMux);
+    portEXIT_CRITICAL(&ecefMux);
     return count;
 }
 
@@ -1866,25 +1957,23 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
     uint8_t commandId,
     const uint8_t* requestedTargetMac,
     uint32_t transactionId,
-    int64_t ecefXmm,
-    int64_t ecefYmm,
-    int64_t ecefZmm,
+    int64_t ecefXScaled,
+    int64_t ecefYScaled,
+    int64_t ecefZScaled,
     uint8_t selectedTargetMac[6])
 {
     const bool validEcef =
-        ecefXmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        ecefXmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        ecefYmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        ecefYmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        ecefZmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        ecefZmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
-        (ecefXmm < -90000 || ecefXmm > 90000);
+        rtcmEspNowValidEcef(ecefXScaled, ecefYScaled, ecefZScaled);
     const bool validArguments =
         transactionId != 0 &&
         ((commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF &&
-          validEcef) ||
-         (commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER &&
-          ecefXmm == 0 && ecefYmm == 0 && ecefZmm == 0));
+         validEcef) ||
+         ((commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER ||
+           commandId == RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK ||
+           commandId == RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK) &&
+          ecefXScaled == 0 &&
+          ecefYScaled == 0 &&
+          ecefZScaled == 0));
     if (!validArguments) {
         return BaseGnssCommandQueueResult::InvalidArgument;
     }
@@ -1917,9 +2006,9 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
         return BaseGnssCommandQueueResult::NoPairedRover;
     }
     command.transactionId = transactionId;
-    command.ecefXmm = ecefXmm;
-    command.ecefYmm = ecefYmm;
-    command.ecefZmm = ecefZmm;
+    command.ecefXScaled = ecefXScaled;
+    command.ecefYScaled = ecefYScaled;
+    command.ecefZScaled = ecefZScaled;
     command.commandId = commandId;
     if (xQueueSend(gnssCommandQueue, &command, 0) != pdTRUE) {
         return BaseGnssCommandQueueResult::QueueFull;
@@ -1929,6 +2018,329 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
     }
     incrementStat(&BaseEspnowStats::gnssCommandQueued);
     return BaseGnssCommandQueueResult::Queued;
+}
+
+void beginResetCohort()
+{
+    const uint32_t now = millis();
+    BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
+    if (source.state != BaseRtcmSourceState::TempPreparing) {
+        return;
+    }
+
+    const size_t snapshotCount =
+        baseEspNowCopyLatestRoverEcef(resetCohortSnapshots,
+                                     ESPNOW_MAX_ECEF_SOURCES);
+    RoverPeer peers[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    const size_t peerCount =
+        copyRoverPeers(peers, ESPNOW_MAX_PAIRED_ROVERS);
+
+    portENTER_CRITICAL(&resetMux);
+    std::memset(resetCohort, 0, sizeof(resetCohort));
+    std::memset(resetBranches, 0, sizeof(resetBranches));
+    resetCohortCount = 0;
+    resetBranchCount = 0;
+    resetGateStartedAtMs = now;
+    for (size_t index = 0; index < snapshotCount; ++index) {
+        const BaseRoverEcefStatus& status = resetCohortSnapshots[index];
+        if (!status.valid ||
+            macEquals(status.mac, source.tempBaseMac) ||
+            resetCohortCount >= ESPNOW_MAX_ECEF_SOURCES) {
+            continue;
+        }
+
+        const uint8_t* branchMac = status.viaRelay
+                                       ? status.relayMac
+                                       : status.mac;
+        if (!macIsConfigured(branchMac)) {
+            continue;
+        }
+        ResetCohortEntry& entry = resetCohort[resetCohortCount++];
+        std::memcpy(entry.roverMac, status.mac, sizeof(entry.roverMac));
+        std::memcpy(entry.branchMac, branchMac, sizeof(entry.branchMac));
+        entry.baselineReceivedAtMs = status.receivedAtMs;
+
+        bool branchExists = false;
+        for (size_t branchIndex = 0;
+             branchIndex < resetBranchCount;
+             ++branchIndex) {
+            branchExists =
+                macEquals(resetBranches[branchIndex].mac, branchMac);
+            if (branchExists) {
+                break;
+            }
+        }
+        if (!branchExists && resetBranchCount < ESPNOW_MAX_PAIRED_ROVERS) {
+            ResetCohortBranch& branch = resetBranches[resetBranchCount++];
+            std::memcpy(branch.mac, branchMac, sizeof(branch.mac));
+            do {
+                branch.transactionId = esp_random();
+            } while (branch.transactionId == 0);
+        }
+    }
+
+    // A paired Rover remains part of the handover gate even if its last ECEF
+    // status is stale or it rebooted immediately before this transition.
+    for (size_t peerIndex = 0; peerIndex < peerCount; ++peerIndex) {
+        const RoverPeer& peer = peers[peerIndex];
+        if (!macIsConfigured(peer.mac) ||
+            macEquals(peer.mac, source.tempBaseMac)) {
+            continue;
+        }
+
+        bool roverExists = false;
+        for (size_t cohortIndex = 0;
+             cohortIndex < resetCohortCount;
+             ++cohortIndex) {
+            if (macEquals(resetCohort[cohortIndex].roverMac, peer.mac)) {
+                roverExists = true;
+                break;
+            }
+        }
+        if (!roverExists &&
+            resetCohortCount < ESPNOW_MAX_ECEF_SOURCES) {
+            ResetCohortEntry& entry =
+                resetCohort[resetCohortCount++];
+            std::memcpy(entry.roverMac, peer.mac,
+                        sizeof(entry.roverMac));
+            std::memcpy(entry.branchMac, peer.mac,
+                        sizeof(entry.branchMac));
+        }
+
+        bool branchExists = false;
+        for (size_t branchIndex = 0;
+             branchIndex < resetBranchCount;
+             ++branchIndex) {
+            if (macEquals(resetBranches[branchIndex].mac, peer.mac)) {
+                branchExists = true;
+                break;
+            }
+        }
+        if (!branchExists &&
+            resetBranchCount < ESPNOW_MAX_PAIRED_ROVERS) {
+            ResetCohortBranch& branch =
+                resetBranches[resetBranchCount++];
+            std::memcpy(branch.mac, peer.mac, sizeof(branch.mac));
+            do {
+                branch.transactionId = esp_random();
+            } while (branch.transactionId == 0);
+        }
+    }
+    portEXIT_CRITICAL(&resetMux);
+
+    portENTER_CRITICAL(&sourceMux);
+    if (rtcmSource.state == BaseRtcmSourceState::TempPreparing &&
+        macEquals(rtcmSource.tempBaseMac, source.tempBaseMac)) {
+        rtcmSource.state = BaseRtcmSourceState::TempResetting;
+    }
+    const bool resetting =
+        rtcmSource.state == BaseRtcmSourceState::TempResetting;
+    portEXIT_CRITICAL(&sourceMux);
+    if (!resetting) {
+        return;
+    }
+
+    ResetCohortBranch branches[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    size_t branchCount = 0;
+    size_t cohortCount = 0;
+    portENTER_CRITICAL(&resetMux);
+    branchCount = resetBranchCount;
+    cohortCount = resetCohortCount;
+    std::memcpy(branches, resetBranches,
+                branchCount * sizeof(ResetCohortBranch));
+    portEXIT_CRITICAL(&resetMux);
+
+    Serial.printf("[BASE][HANDOVER_RESET] state=START rovers=%u branches=%u "
+                  "timeout_ms=%lu\n",
+                  static_cast<unsigned>(cohortCount),
+                  static_cast<unsigned>(branchCount),
+                  static_cast<unsigned long>(TEMP_RESET_GATE_TIMEOUT_MS));
+    for (size_t index = 0; index < branchCount; ++index) {
+        setRoverRtcmEnabled(branches[index].mac, false);
+        uint8_t selectedMac[6] = {};
+        const BaseGnssCommandQueueResult result = queueRoverGnssCommand(
+            RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK,
+            branches[index].mac,
+            branches[index].transactionId,
+            0,
+            0,
+            0,
+            selectedMac);
+        portENTER_CRITICAL(&resetMux);
+        for (size_t branchIndex = 0;
+             branchIndex < resetBranchCount;
+             ++branchIndex) {
+            if (macEquals(resetBranches[branchIndex].mac,
+                          branches[index].mac)) {
+                resetBranches[branchIndex].commandQueued =
+                    result == BaseGnssCommandQueueResult::Queued;
+                break;
+            }
+        }
+        portEXIT_CRITICAL(&resetMux);
+        Serial.printf("[BASE][HANDOVER_RESET] branch=%s txn=%lu queue=%s\n",
+                      macToString(branches[index].mac).c_str(),
+                      static_cast<unsigned long>(
+                          branches[index].transactionId),
+                      baseGnssCommandQueueResultToString(result));
+    }
+}
+
+void observeResetCohortStatus(const uint8_t* roverMac,
+                              uint8_t fixQuality,
+                              uint32_t receivedAtMs)
+{
+    if (roverMac == nullptr || fixQuality == 4 || fixQuality == 5) {
+        return;
+    }
+    bool observed = false;
+    portENTER_CRITICAL(&resetMux);
+    for (size_t index = 0; index < resetCohortCount; ++index) {
+        ResetCohortEntry& entry = resetCohort[index];
+        if (macEquals(entry.roverMac, roverMac) &&
+            receivedAtMs > entry.baselineReceivedAtMs) {
+            entry.nonRtkObservedAtMs = receivedAtMs;
+            observed = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&resetMux);
+    if (observed) {
+        Serial.printf("[BASE][HANDOVER_RESET] rover=%s fresh_fix=%u\n",
+                      macToString(roverMac).c_str(),
+                      static_cast<unsigned>(fixQuality));
+    }
+}
+
+void markResetBranchAcked(const uint8_t* branchMac)
+{
+    if (branchMac == nullptr) {
+        return;
+    }
+    bool marked = false;
+    const uint32_t now = millis();
+    portENTER_CRITICAL(&resetMux);
+    for (size_t index = 0; index < resetBranchCount; ++index) {
+        if (macEquals(resetBranches[index].mac, branchMac)) {
+            resetBranches[index].commandAcked = true;
+            resetBranches[index].ackedAtMs = now;
+            marked = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&resetMux);
+    if (marked) {
+        Serial.printf("[BASE][HANDOVER_RESET] branch=%s command_ack=1\n",
+                      macToString(branchMac).c_str());
+    }
+}
+
+void queueRtkResumeForBranches(const ResetCohortBranch* branches,
+                               size_t branchCount,
+                               const char* reason)
+{
+    for (size_t index = 0; index < branchCount; ++index) {
+        setRoverRtcmEnabled(branches[index].mac, false);
+        uint32_t transactionId = 0;
+        do {
+            transactionId = esp_random();
+        } while (transactionId == 0);
+        uint8_t selectedMac[6] = {};
+        const BaseGnssCommandQueueResult result = queueRoverGnssCommand(
+            RTCM_ESPNOW_GNSS_COMMAND_RESUME_RTK,
+            branches[index].mac,
+            transactionId,
+            0,
+            0,
+            0,
+            selectedMac);
+        Serial.printf("[BASE][HANDOVER_RESUME] branch=%s txn=%lu queue=%s reason=%s\n",
+                      macToString(branches[index].mac).c_str(),
+                      static_cast<unsigned long>(transactionId),
+                      baseGnssCommandQueueResultToString(result),
+                      reason == nullptr ? "unknown" : reason);
+    }
+}
+
+void progressResetCohort(uint32_t now)
+{
+    BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
+    if (source.state != BaseRtcmSourceState::TempResetting) {
+        return;
+    }
+
+    bool ready = true;
+    bool timedOut = false;
+    ResetCohortBranch branches[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    size_t branchCount = 0;
+    portENTER_CRITICAL(&resetMux);
+    branchCount = resetBranchCount;
+    std::memcpy(branches, resetBranches,
+                branchCount * sizeof(ResetCohortBranch));
+    for (size_t index = 0; index < resetBranchCount; ++index) {
+        ready = ready && resetBranches[index].commandQueued &&
+                resetBranches[index].commandAcked;
+    }
+    for (size_t index = 0; index < resetCohortCount; ++index) {
+        uint32_t branchAckedAtMs = 0;
+        for (size_t branchIndex = 0;
+             branchIndex < resetBranchCount;
+             ++branchIndex) {
+            if (macEquals(resetCohort[index].branchMac,
+                          resetBranches[branchIndex].mac)) {
+                branchAckedAtMs = resetBranches[branchIndex].ackedAtMs;
+                break;
+            }
+        }
+        ready = ready &&
+                resetCohort[index].nonRtkObservedAtMs >= branchAckedAtMs &&
+                branchAckedAtMs != 0;
+    }
+    timedOut =
+        now - resetGateStartedAtMs > TEMP_RESET_GATE_TIMEOUT_MS ||
+        source.lastTempFrameAtMs == 0 ||
+        now - source.lastTempFrameAtMs > TEMP_RTCM_SOURCE_TIMEOUT_MS;
+    portEXIT_CRITICAL(&resetMux);
+
+    if (!ready && !timedOut) {
+        return;
+    }
+    if (ready) {
+        if (tempRtcmFrameQueue != nullptr) {
+            xQueueReset(tempRtcmFrameQueue);
+        }
+        Serial.println("[BASE][HANDOVER_RESET] state=COMPLETE");
+        queueRtkResumeForBranches(branches, branchCount, "temp_active");
+        activateTempSource();
+    } else {
+        Serial.println("[BASE][HANDOVER_RESET][ERROR] state=TIMEOUT; keep local RTCM");
+        queueRtkResumeForBranches(branches, branchCount, "local_fallback");
+        switchToLocalFallback("reset_gate_timeout");
+        uint8_t ignoredMac[6] = {};
+        uint32_t transactionId = 0;
+        do {
+            transactionId = esp_random();
+        } while (transactionId == 0);
+        const BaseGnssCommandQueueResult result = queueRoverGnssCommand(
+            RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER,
+            source.tempBaseMac,
+            transactionId,
+            0,
+            0,
+            0,
+            ignoredMac);
+        Serial.printf("[BASE][HANDOVER_RESET] rollback_temp=%s queue=%s\n",
+                      macToString(source.tempBaseMac).c_str(),
+                      baseGnssCommandQueueResultToString(result));
+    }
+
+    portENTER_CRITICAL(&resetMux);
+    std::memset(resetCohort, 0, sizeof(resetCohort));
+    std::memset(resetBranches, 0, sizeof(resetBranches));
+    resetCohortCount = 0;
+    resetBranchCount = 0;
+    resetGateStartedAtMs = 0;
+    portEXIT_CRITICAL(&resetMux);
 }
 
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
@@ -1943,6 +2355,17 @@ BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
         0,
         0,
         targetMac);
+}
+
+void baseEspNowMarkLocalBaseReady()
+{
+    portENTER_CRITICAL(&sourceMux);
+    if (rtcmSource.state == BaseRtcmSourceState::LocalFallback) {
+        rtcmSource.state = BaseRtcmSourceState::LocalActive;
+        std::memset(rtcmSource.tempBaseMac, 0,
+                    sizeof(rtcmSource.tempBaseMac));
+    }
+    portEXIT_CRITICAL(&sourceMux);
 }
 
 BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
@@ -1963,18 +2386,33 @@ BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
 BaseGnssCommandQueueResult baseEspNowQueueRoverBaseFixedEcef(
     const uint8_t requestedTargetMac[6],
     uint32_t transactionId,
-    int64_t ecefXmm,
-    int64_t ecefYmm,
-    int64_t ecefZmm,
+    int64_t ecefXScaled,
+    int64_t ecefYScaled,
+    int64_t ecefZScaled,
     uint8_t selectedTargetMac[6])
 {
     return queueRoverGnssCommand(
         RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF,
         requestedTargetMac,
         transactionId,
-        ecefXmm,
-        ecefYmm,
-        ecefZmm,
+        ecefXScaled,
+        ecefYScaled,
+        ecefZScaled,
+        selectedTargetMac);
+}
+
+BaseGnssCommandQueueResult baseEspNowQueueRoverRtkReset(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
+    uint8_t selectedTargetMac[6])
+{
+    return queueRoverGnssCommand(
+        RTCM_ESPNOW_GNSS_COMMAND_RESET_RTK,
+        requestedTargetMac,
+        transactionId,
+        0,
+        0,
+        0,
         selectedTargetMac);
 }
 

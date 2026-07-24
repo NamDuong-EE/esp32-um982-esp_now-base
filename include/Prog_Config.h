@@ -66,13 +66,13 @@ inline constexpr char MQTT_PASSWORD[] = BASE_MQTT_PASSWORD;
 inline constexpr char MQTT_TOPIC_STATUS[] = "aitogy/base/test/status";
 inline constexpr char MQTT_TOPIC_COMMAND[] = "aitogy/base/test/command";
 inline constexpr char MQTT_TOPIC_COMMAND_RESULT[] = "aitogy/base/test/command-result";
-inline constexpr char MQTT_TOPIC_ROVER_LLH_PREFIX[] = "aitogy/base/rovers";
+inline constexpr char MQTT_TOPIC_ROVER_ECEF_PREFIX[] = "aitogy/base/rovers";
 inline constexpr uint32_t NETWORK_RECONNECT_INTERVAL_MS = 10000;
 inline constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
-inline constexpr uint32_t MQTT_LLH_RETRY_INTERVAL_MS = 1000;
+inline constexpr uint32_t MQTT_ECEF_RETRY_INTERVAL_MS = 1000;
 inline constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 30;
 inline constexpr uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 2;
-inline constexpr uint16_t MQTT_BUFFER_SIZE = 512;
+inline constexpr uint16_t MQTT_BUFFER_SIZE = 1024;
 
 // SIM7600 defaults for the future 4G board. Confirm these pins against the PCB.
 inline constexpr int MODEM_RX_PIN = 26; // ESP32 RX <- modem TX.
@@ -98,20 +98,30 @@ inline constexpr uint32_t ESPNOW_FRAME_ACK_TIMEOUT_MS = 300;
 inline constexpr uint8_t ESPNOW_FRAME_RETRY_COUNT = 1;
 inline constexpr uint8_t ESPNOW_PEER_FAILURES_BEFORE_COOLDOWN = 2;
 inline constexpr uint32_t ESPNOW_PEER_FAILURE_COOLDOWN_MS = 3000;
-inline constexpr size_t ESPNOW_GNSS_COMMAND_QUEUE_LENGTH = 4;
+inline constexpr size_t ESPNOW_GNSS_COMMAND_QUEUE_LENGTH = 8;
 inline constexpr size_t ESPNOW_GNSS_COMMAND_RESULT_QUEUE_LENGTH = 4;
 inline constexpr uint32_t ESPNOW_GNSS_COMMAND_RESULT_TIMEOUT_MS = 10000;
 inline constexpr uint8_t ESPNOW_GNSS_COMMAND_SEND_RETRY_COUNT = 1;
 inline constexpr uint32_t TEMP_BASE_FIXED_WAIT_DEFAULT_SECONDS = 120;
 inline constexpr uint32_t TEMP_BASE_FIXED_WAIT_MAX_SECONDS = 3600;
-inline constexpr uint32_t TEMP_BASE_FIXED_LLH_MAX_AGE_MS = 3000;
+inline constexpr uint32_t TEMP_BASE_FIXED_ECEF_MAX_AGE_MS = 3000;
 inline constexpr size_t TEMP_RTCM_RX_QUEUE_LENGTH = 16;
 inline constexpr size_t TEMP_RTCM_FRAME_QUEUE_LENGTH = 3;
+inline constexpr uint32_t TEMP_RTCM_RX_TASK_STACK_BYTES = 8192;
 inline constexpr uint32_t TEMP_RTCM_REASSEMBLY_TIMEOUT_MS = 1500;
 inline constexpr uint32_t TEMP_RTCM_SOURCE_TIMEOUT_MS = 3500;
-inline constexpr uint32_t TEMP_RTCM_PREPARING_TIMEOUT_MS = 10000;
+inline constexpr uint32_t TEMP_RTCM_PREPARING_TIMEOUT_MS = 15000;
 inline constexpr uint32_t TEMP_RTCM_FIXED_GUARD_MS = 3000;
 inline constexpr uint8_t TEMP_RTCM_READY_CYCLES = 2;
+inline constexpr uint32_t TEMP_RESET_GATE_TIMEOUT_MS = 45000;
+inline constexpr uint8_t BASE_ECEF_CORRECTION_WARMUP_SAMPLES = 3;
+inline constexpr int64_t BASE_ECEF_CORRECTION_MAX_ABS_SCALED = 50000;
+inline constexpr int64_t BASE_ECEF_CORRECTION_MAX_STEP_SCALED = 5000;
+inline constexpr uint32_t BASE_ECEF_CORRECTION_MAX_AGE_MS = 3000;
+inline constexpr uint32_t BASE_ECEF_CORRECTION_MAX_TIME_DELTA_MS = 1500;
+inline constexpr uint32_t BASE_GNSS_ROLE_COMMAND_DELAY_MS = 1000;
+inline constexpr uint32_t BASE_GNSS_OUTPUT_COMMAND_DELAY_MS = 100;
+inline constexpr size_t GNSS_TX_BUFFER_SIZE = 2048;
 
 // ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to
 // discover MAC addresses by broadcast, then switch back to unicast runtime.
@@ -123,7 +133,7 @@ inline constexpr uint32_t PAIRING_WINDOW_MS = 60000;
 inline constexpr uint32_t PAIR_DISCOVERY_INTERVAL_MS = 500;
 inline constexpr uint8_t ESPNOW_MAX_PAIRED_ROVERS = 5;
 inline constexpr uint8_t ESPNOW_MAX_CHILDREN_PER_RELAY = 5;
-inline constexpr uint8_t ESPNOW_MAX_LLH_SOURCES =
+inline constexpr uint8_t ESPNOW_MAX_ECEF_SOURCES =
     ESPNOW_MAX_PAIRED_ROVERS * (1 + ESPNOW_MAX_CHILDREN_PER_RELAY);
 inline constexpr uint32_t ESPNOW_NETWORK_ID = 0xA1700001UL;
 inline constexpr uint8_t ESPNOW_PAIRING_KEY[16] = {

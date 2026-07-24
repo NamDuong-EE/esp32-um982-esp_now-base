@@ -5,9 +5,9 @@
 #include "Prog_Config.h"
 #include "RtcmEspNowProtocol.h"
 #include "functions/NetworkMqttManager.h"
+#include "functions/BaseGnssRoleController.h"
 #include "functions/Rtcm_Frame_Reader.h"
 #include "hardware/BaseEspnow_sender.h"
-#include <math>
 
 namespace {
 struct RtcmFrameEnvelope {
@@ -165,12 +165,23 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
     static uint8_t parserFrame[RTCM_ESPNOW_MAX_FRAME_LENGTH] = {};
 
     while (true) {
+        if (baseGnssRoleConsumesNmea()) {
+            while (Serial1.available()) {
+                const int value = Serial1.read();
+                if (value >= 0) {
+                    baseGnssRoleConsumeByte(static_cast<uint8_t>(value));
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
         size_t frameLength = 0;
         const RtcmReadResult result =
             readRtcmFrame(Serial1, parserFrame, sizeof(parserFrame), frameLength);
 
         switch (result) {
         case RtcmReadResult::FrameValid:
+            baseGnssRoleRecordLocalRtcm(parserFrame, frameLength);
             flushRtcmDebugLine();
             if (DEBUG_RTCM_FRAME_LOG) {
                 Serial.printf("[BASE][GNSS] RTCM id=%u length=%u\n",
@@ -217,6 +228,12 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             while (xQueueReceive(rtcmFrameQueue, &envelope, 0) == pdTRUE) {
             }
         }
+        if (source.state == BaseRtcmSourceState::TempResetting) {
+            while (xQueueReceive(rtcmFrameQueue, &envelope, 0) == pdTRUE) {
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
 
         bool haveFrame = false;
         const bool fromTemp = source.state == BaseRtcmSourceState::TempActive;
@@ -227,6 +244,7 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                 envelope.messageId = tempFrame.messageId;
                 envelope.receivedAtMs = tempFrame.receivedAtMs;
                 std::memcpy(envelope.data, tempFrame.data, tempFrame.length);
+                baseGnssRoleInjectTempRtcm(tempFrame.data, tempFrame.length);
                 haveFrame = true;
             }
         } else {
@@ -240,6 +258,7 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
 
         const BaseRtcmSourceSnapshot sourceBeforeSend = getBaseRtcmSourceSnapshot();
         if (sourceBeforeSend.epoch != observedSourceEpoch ||
+            sourceBeforeSend.state == BaseRtcmSourceState::TempResetting ||
             (fromTemp && sourceBeforeSend.state != BaseRtcmSourceState::TempActive) ||
             (!fromTemp && sourceBeforeSend.state == BaseRtcmSourceState::TempActive)) {
             continue;
@@ -402,9 +421,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
         Serial.printf(
             "[BASE][NETWORK_HEALTH] transport=%s configured=%u internet=%u mqtt=%u "
             "signal_dbm=%ld network_attempt=%lu mqtt_attempt=%lu mqtt_connect=%lu "
-            "mqtt_disconnect=%lu llh_published=%lu llh_publish_fail=%lu "
-            "llh_publish_age_ms=%lu cmd_rx=%lu cmd_reject=%lu "
-            "cmd_result_pub=%lu cmd_result_pub_fail=%lu\n",
+            "mqtt_disconnect=%lu ecef_published=%lu ecef_publish_fail=%lu "
+            "ecef_publish_age_ms=%lu cmd_rx=%lu cmd_reject=%lu "
+            "cmd_result_pub=%lu cmd_result_pub_fail=%lu stack_hwm_bytes=%lu\n",
             networkTransportName(),
             network.configured ? 1U : 0U,
             network.internetConnected ? 1U : 0U,
@@ -422,7 +441,8 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(network.commandsReceived),
             static_cast<unsigned long>(network.commandsRejected),
             static_cast<unsigned long>(network.commandResultsPublished),
-            static_cast<unsigned long>(network.commandResultPublishFailures));
+            static_cast<unsigned long>(network.commandResultPublishFailures),
+            static_cast<unsigned long>(network.stackHighWaterBytes));
 
         previousLogAt = now;
         previousRawBytes = rawBytes;
@@ -441,34 +461,23 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
     }
 }
 
-[[noreturn]] void roverLlhLogTask(void*)
+[[noreturn]] void roverEcefLogTask(void*)
 {
-    uint32_t lastSequences[ESPNOW_MAX_LLH_SOURCES] = {};
-    bool haveSequence[ESPNOW_MAX_LLH_SOURCES] = {};
+    uint32_t lastSequences[ESPNOW_MAX_ECEF_SOURCES] = {};
+    bool haveSequence[ESPNOW_MAX_ECEF_SOURCES] = {};
+    static BaseRoverEcefStatus snapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(200));
-        BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
-        const size_t count = baseEspNowCopyLatestRoverLlh(
-            snapshots, ESPNOW_MAX_LLH_SOURCES);
+        const size_t count = baseEspNowCopyLatestRoverEcef(
+            snapshots, ESPNOW_MAX_ECEF_SOURCES);
         for (size_t index = 0; index < count; ++index) {
-            const BaseRoverLlhStatus& status = snapshots[index];
+            const BaseRoverEcefStatus& status = snapshots[index];
             if (!status.valid ||
                 (haveSequence[index] && lastSequences[index] == status.sequence)) {
                 continue;
             }
             haveSequence[index] = true;
             lastSequences[index] = status.sequence;
-            const double latitude =
-                static_cast<double>(status.latitudeE7) /
-                RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-            const double longitude =
-                static_cast<double>(status.longitudeE7) /
-                RTCM_ESPNOW_LLH_COORDINATE_SCALE;
-            const double heightM =
-                static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
-            const double ellipsoidHeightM =
-                static_cast<double>(status.ellipsoidHeightMm) /
-                RTCM_ESPNOW_LLH_HEIGHT_SCALE;
             char relayMacText[18] = {};
             if (status.viaRelay) {
                 snprintf(relayMacText, sizeof(relayMacText),
@@ -485,15 +494,22 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                          status.tempBaseMac[4], status.tempBaseMac[5]);
             }
             Serial.printf(
-                "[BASE][ROVER_LLH] mac=%02X:%02X:%02X:%02X:%02X:%02X seq=%lu "
-                "lat=%.7f lon=%.7f height_m=%.3f ellipsoid_height_m=%.3f "
-                "fix_quality=%u "
+                "[BASE][ROVER_ECEF] mac=%02X:%02X:%02X:%02X:%02X:%02X "
+                "seq=%lu gnss_ms=%lu stream=%u "
+                "ecef_m=(%.4f,%.4f,%.4f) fix_quality=%u "
                 "via=%s relay_mac=%s rtcm_source=%s temp_base_mac=%s "
                 "source_epoch=%lu age_ms=%lu\n",
                 status.mac[0], status.mac[1], status.mac[2],
                 status.mac[3], status.mac[4], status.mac[5],
                 static_cast<unsigned long>(status.sequence),
-                latitude, longitude, heightM, ellipsoidHeightM,
+                static_cast<unsigned long>(status.gnssTimeMsOfDay),
+                static_cast<unsigned>(status.correctionStreamId),
+                static_cast<double>(status.ecefXScaled) /
+                    RTCM_ESPNOW_ECEF_SCALE,
+                static_cast<double>(status.ecefYScaled) /
+                    RTCM_ESPNOW_ECEF_SCALE,
+                static_cast<double>(status.ecefZScaled) /
+                    RTCM_ESPNOW_ECEF_SCALE,
                 static_cast<unsigned>(status.fixQuality),
                 status.viaRelay ? "relay" : "direct",
                 relayMacText,
@@ -539,6 +555,9 @@ void setup()
     if (Serial1.setRxBufferSize(GNSS_RX_BUFFER_SIZE) != GNSS_RX_BUFFER_SIZE) {
         Serial.println("[BASE][GNSS][ERROR] Failed to set UART RX buffer");
     }
+    if (Serial1.setTxBufferSize(GNSS_TX_BUFFER_SIZE) != GNSS_TX_BUFFER_SIZE) {
+        Serial.println("[BASE][GNSS][WARN] Failed to set UART TX buffer");
+    }
     Serial1.begin(GNSS_BAUD, SERIAL_8N1, RX_GNSS, TX_GNSS);
     Serial.printf("[BASE][GNSS] ESP32 Serial1 reading %s, baud=%lu RX=%d TX=%d rx_buffer=%u\n",
                   GNSS_UART_PORT_NAME,
@@ -563,13 +582,18 @@ void setup()
         delay(5000);
         ESP.restart();
     }
+    if (!baseGnssRoleSetup()) {
+        Serial.println("[BASE][SETUP][ERROR] Local GNSS role controller failed");
+        delay(5000);
+        ESP.restart();
+    }
 
     const bool tasksReady =
         createTask(taskRtcmReader, "RTCM Reader", 6144, 4, 1) &&
         createTask(taskRtcmSender, "RTCM Sender", 6144, 3, 1) &&
         createTask(healthLogTask, "Health Task", 4096, 1, 1) &&
-        createTask(roverLlhLogTask, "Rover LLH", 4096, 1, 1) &&
-        createTask(networkMqttTask, "Network MQTT", 6144, 1, 0);
+        createTask(roverEcefLogTask, "Rover ECEF", 4096, 1, 1) &&
+        createTask(networkMqttTask, "Network MQTT", 10240, 1, 0);
     if (!tasksReady) {
         delay(5000);
         ESP.restart();
@@ -584,5 +608,6 @@ void setup()
 void loop()
 {
     baseEspNowLoop();
+    baseGnssRoleLoop();
     vTaskDelay(pdMS_TO_TICKS(20));
 }

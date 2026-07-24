@@ -19,6 +19,7 @@ struct NetworkMqttStats {
     uint32_t commandsRejected = 0;
     uint32_t commandResultsPublished = 0;
     uint32_t commandResultPublishFailures = 0;
+    uint32_t stackHighWaterBytes = 0;
 };
 
 void setupNetworkMqtt();

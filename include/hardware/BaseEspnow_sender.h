@@ -5,28 +5,33 @@
 #include <cstddef>
 #include <cstdint>
 
-struct BaseRoverLlhStatus {
+enum class BaseRtcmSourceState : uint8_t {
+    LocalActive = 0,
+    TempPreparing,
+    TempResetting,
+    TempActive,
+    LocalFallback,
+};
+
+struct BaseRoverEcefStatus {
     uint8_t mac[6] = {};
     uint8_t relayMac[6] = {};
     bool viaRelay = false;
     uint32_t sequence = 0;
-    int32_t latitudeE7 = 0;
-    int32_t longitudeE7 = 0;
-    int32_t heightMm = 0;
-    int32_t ellipsoidHeightMm = 0;
+    uint32_t gnssTimeMsOfDay = 0;
+    uint16_t correctionStreamId = 0;
+    int64_t ecefXScaled = 0;
+    int64_t ecefYScaled = 0;
+    int64_t ecefZScaled = 0;
     uint8_t fixQuality = 0;
     bool usesTempBase = false;
+    bool hasSelectedTempBase = false;
     uint8_t tempBaseMac[6] = {};
+    BaseRtcmSourceState rtcmSourceState =
+        BaseRtcmSourceState::LocalActive;
     uint32_t rtcmSourceEpoch = 0;
     uint32_t receivedAtMs = 0;
     bool valid = false;
-};
-
-enum class BaseRtcmSourceState : uint8_t {
-    LocalActive = 0,
-    TempPreparing,
-    TempActive,
-    LocalFallback,
 };
 
 struct BaseRtcmSourceSnapshot {
@@ -61,9 +66,9 @@ struct BaseGnssCommandResultEvent {
     uint8_t completedStep = 0;
     uint8_t totalSteps = 0;
     uint16_t detailCode = 0;
-    int64_t ecefXmm = 0;
-    int64_t ecefYmm = 0;
-    int64_t ecefZmm = 0;
+    int64_t ecefXScaled = 0;
+    int64_t ecefYScaled = 0;
+    int64_t ecefZScaled = 0;
     uint32_t receivedAtMs = 0;
     bool responseTimedOut = false;
 };
@@ -113,6 +118,7 @@ struct BaseEspnowStats {
 
 bool setupEspNowBase();
 void baseEspNowLoop();
+void baseEspNowMarkLocalBaseReady();
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length);
 bool baseEspNowShouldForwardLocalRtcm();
 bool baseEspNowPopTempRtcmFrame(BaseTempRtcmFrame& frame, TickType_t waitTicks);
@@ -120,8 +126,8 @@ BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot();
 const char* baseRtcmSourceStateToString(BaseRtcmSourceState state);
 BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
-size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
-                                    size_t capacity);
+size_t baseEspNowCopyLatestRoverEcef(BaseRoverEcefStatus* destination,
+                                     size_t capacity);
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
     uint32_t transactionId,
     uint8_t targetMac[6]);
@@ -132,9 +138,13 @@ BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
 BaseGnssCommandQueueResult baseEspNowQueueRoverBaseFixedEcef(
     const uint8_t requestedTargetMac[6],
     uint32_t transactionId,
-    int64_t ecefXmm,
-    int64_t ecefYmm,
-    int64_t ecefZmm,
+    int64_t ecefXScaled,
+    int64_t ecefYScaled,
+    int64_t ecefZScaled,
+    uint8_t selectedTargetMac[6]);
+BaseGnssCommandQueueResult baseEspNowQueueRoverRtkReset(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
     uint8_t selectedTargetMac[6]);
 bool baseEspNowIsDirectRoverPaired(const uint8_t targetMac[6]);
 bool baseEspNowPopGnssCommandResult(BaseGnssCommandResultEvent& result);
