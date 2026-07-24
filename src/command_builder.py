@@ -167,59 +167,6 @@ def _append_unicore_output_commands(commands: list[bytes], port: str, gnss_optio
         commands.append(b'$DELAY_200$')
 
 
-def build_base_survey_in_command(sensor_type: str, duration: int, accuracy: float, gnss_options: dict | None = None) -> list[bytes]:
-    commands = []
-    
-    if sensor_type == 'Ublox':
-        # Tạo message với cấu trúc chính xác
-        message = bytearray(b'\xb5\x62\x06\x71\x28\x00' + b'\x00' * 42)
-        
-        # Byte 8: Mode = 1 (Survey-In)
-        message[8] = 1
-        
-        # Chuyển đổi duration và accuracy (ép kiểu float đề phòng dữ liệu là string)
-        svinMinDur_bytes = int(duration).to_bytes(4, byteorder='little')
-        svinAccLimit_bytes = int(float(accuracy) * 10000).to_bytes(4, byteorder='little')
-        
-        # Ghi vào vị trí đúng
-        for i in range(4):
-            message[30 + i] = svinMinDur_bytes[i]
-            message[34 + i] = svinAccLimit_bytes[i]
-        
-        # Tính checksum
-        CK_A, CK_B = 0, 0
-        for i in range(2, 46):
-            CK_A = (CK_A + message[i]) & 0xff
-            CK_B = (CK_B + CK_A) & 0xff
-        
-        message[46] = CK_A
-        message[47] = CK_B
-        
-        commands.append(bytes(message))
-        commands.append(build_ublox_output_config_command(gnss_options))
-        # Lệnh Save Config
-        commands.append(UBLOX_SAVE_CONFIG)
-        
-    elif sensor_type == 'Unicorecomm':
-        # BƯỚC 1: Clear all logs (TẮT TẤT CẢ OUTPUT)
-        commands.append(b'unlogall\r\n')
-        commands.append(b'$DELAY_1000$')
-        
-        # BƯỚC 2: Set base mode (Survey-In)
-        cmd_str = f'mode base time {duration}\r\n'
-        logging.info(f"🔍 Survey-In command: {repr(cmd_str)}")
-        commands.append(cmd_str.encode('ascii'))
-        commands.append(b'$DELAY_2000$')
-        
-        logging.info("Configuring Unicore output messages on COM3")
-        _append_unicore_output_commands(commands, "com3", gnss_options)
-        
-        # BƯỚC 5: Save config
-        commands.append(b'saveconfig\r\n')
-        
-    return commands
-
-
 def build_base_fixed_lla_command(sensor_type: str, lat: float, lon: float, alt: float, accuracy: float, gnss_options: dict | None = None) -> list[bytes]:
     commands = []
     
@@ -308,7 +255,7 @@ def build_base_fixed_lla_command(sensor_type: str, lat: float, lon: float, alt: 
     return commands
 
 
-def build_geotek_lte_unicore_config(setup_method: str, duration: int = 60, lat: float = 0, lon: float = 0, alt: float = 0) -> list[bytes]:
+def build_geotek_lte_unicore_fixed_ecef_config(x: float, y: float, z: float) -> list[bytes]:
     """
     Hàm chuyên biệt dành riêng cho chip Unicorecomm LTE.
     Sử dụng mặc định cổng COM2 và chuỗi lệnh tối ưu theo yêu cầu người dùng.
@@ -321,12 +268,8 @@ def build_geotek_lte_unicore_config(setup_method: str, duration: int = 60, lat: 
     commands.append(b'FRESET\r\n')
     commands.append(b'unlogall\r\n')
     
-    # 2. Cấu hình chế độ Base (Survey-In hoặc Fixed)
-    if setup_method.upper() == 'SURVEY_IN':
-        commands.append(f'mode base time {duration}\r\n'.encode('ascii'))
-    else:
-        # Giữ nguyên độ chính xác của tọa độ
-        commands.append(f'mode base {lat} {lon} {alt}\r\n'.encode('ascii'))
+    # 2. Temporary Base always uses the RTK-fixed ECEF position.
+    commands.append(f'mode base {x} {y} {z}\r\n'.encode('ascii'))
     
     # 3. Bật các bản tin NMEA cần thiết trên COM2 (12 bản tin)
     # Unicore LTE: chi bat GGA/GST. GSA/GSV lam stream MQTT/RTCM khong on dinh.

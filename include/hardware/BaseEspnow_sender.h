@@ -13,6 +13,7 @@ struct BaseRoverLlhStatus {
     int32_t latitudeE7 = 0;
     int32_t longitudeE7 = 0;
     int32_t heightMm = 0;
+    int32_t ellipsoidHeightMm = 0;
     uint8_t fixQuality = 0;
     bool usesTempBase = false;
     uint8_t tempBaseMac[6] = {};
@@ -60,6 +61,9 @@ struct BaseGnssCommandResultEvent {
     uint8_t completedStep = 0;
     uint8_t totalSteps = 0;
     uint16_t detailCode = 0;
+    int64_t ecefXmm = 0;
+    int64_t ecefYmm = 0;
+    int64_t ecefZmm = 0;
     uint32_t receivedAtMs = 0;
     bool responseTimedOut = false;
 };
@@ -118,22 +122,21 @@ BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
 size_t baseEspNowCopyLatestRoverLlh(BaseRoverLlhStatus* destination,
                                     size_t capacity);
-BaseGnssCommandQueueResult baseEspNowQueueFirstRoverBaseSurveyIn(
-    uint32_t transactionId,
-    uint32_t surveyDurationSeconds,
-    uint8_t targetMac[6]);
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
     uint32_t transactionId,
     uint8_t targetMac[6]);
-BaseGnssCommandQueueResult baseEspNowQueueRoverBaseSurveyIn(
-    const uint8_t requestedTargetMac[6],
-    uint32_t transactionId,
-    uint32_t surveyDurationSeconds,
-    uint8_t selectedTargetMac[6]);
 BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
     const uint8_t requestedTargetMac[6],
     uint32_t transactionId,
     uint8_t selectedTargetMac[6]);
+BaseGnssCommandQueueResult baseEspNowQueueRoverBaseFixedEcef(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
+    int64_t ecefXmm,
+    int64_t ecefYmm,
+    int64_t ecefZmm,
+    uint8_t selectedTargetMac[6]);
+bool baseEspNowIsDirectRoverPaired(const uint8_t targetMac[6]);
 bool baseEspNowPopGnssCommandResult(BaseGnssCommandResultEvent& result);
 const char* baseGnssCommandQueueResultToString(BaseGnssCommandQueueResult result);
 

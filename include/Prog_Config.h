@@ -67,7 +67,6 @@ inline constexpr char MQTT_TOPIC_STATUS[] = "aitogy/base/test/status";
 inline constexpr char MQTT_TOPIC_COMMAND[] = "aitogy/base/test/command";
 inline constexpr char MQTT_TOPIC_COMMAND_RESULT[] = "aitogy/base/test/command-result";
 inline constexpr char MQTT_TOPIC_ROVER_LLH_PREFIX[] = "aitogy/base/rovers";
-inline constexpr uint32_t MQTT_DEFAULT_SURVEY_DURATION_SECONDS = 60;
 inline constexpr uint32_t NETWORK_RECONNECT_INTERVAL_MS = 10000;
 inline constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 inline constexpr uint32_t MQTT_LLH_RETRY_INTERVAL_MS = 1000;
@@ -103,12 +102,15 @@ inline constexpr size_t ESPNOW_GNSS_COMMAND_QUEUE_LENGTH = 4;
 inline constexpr size_t ESPNOW_GNSS_COMMAND_RESULT_QUEUE_LENGTH = 4;
 inline constexpr uint32_t ESPNOW_GNSS_COMMAND_RESULT_TIMEOUT_MS = 10000;
 inline constexpr uint8_t ESPNOW_GNSS_COMMAND_SEND_RETRY_COUNT = 1;
+inline constexpr uint32_t TEMP_BASE_FIXED_WAIT_DEFAULT_SECONDS = 120;
+inline constexpr uint32_t TEMP_BASE_FIXED_WAIT_MAX_SECONDS = 3600;
+inline constexpr uint32_t TEMP_BASE_FIXED_LLH_MAX_AGE_MS = 3000;
 inline constexpr size_t TEMP_RTCM_RX_QUEUE_LENGTH = 16;
 inline constexpr size_t TEMP_RTCM_FRAME_QUEUE_LENGTH = 3;
 inline constexpr uint32_t TEMP_RTCM_REASSEMBLY_TIMEOUT_MS = 1500;
 inline constexpr uint32_t TEMP_RTCM_SOURCE_TIMEOUT_MS = 3500;
 inline constexpr uint32_t TEMP_RTCM_PREPARING_TIMEOUT_MS = 10000;
-inline constexpr uint32_t TEMP_RTCM_SURVEY_GUARD_MS = 3000;
+inline constexpr uint32_t TEMP_RTCM_FIXED_GUARD_MS = 3000;
 inline constexpr uint8_t TEMP_RTCM_READY_CYCLES = 2;
 
 // ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to

@@ -29,7 +29,9 @@ struct RoverPeer {
 struct QueuedGnssCommand {
     uint8_t roverMac[6];
     uint32_t transactionId;
-    uint32_t surveyDurationSeconds;
+    int64_t ecefXmm;
+    int64_t ecefYmm;
+    int64_t ecefZmm;
     uint8_t commandId;
 };
 
@@ -79,11 +81,14 @@ volatile bool waitingForGnssCommandResult = false;
 uint8_t expectedGnssCommandMac[6] = {};
 uint32_t expectedGnssCommandTransactionId = 0;
 uint8_t expectedGnssCommandId = 0;
+int64_t expectedGnssCommandEcefXmm = 0;
+int64_t expectedGnssCommandEcefYmm = 0;
+int64_t expectedGnssCommandEcefZmm = 0;
 uint32_t lastNoRtcmPeerWarningAtMs = 0;
 size_t nextPeerStartIndex = 0;
 
 BaseRtcmSourceSnapshot rtcmSource{};
-uint32_t tempSurveyReadyAtMs = 0;
+uint32_t tempFixedReadyAtMs = 0;
 uint8_t tempCycleMsmMask = 0;
 bool tempCycleStarted = false;
 
@@ -210,7 +215,7 @@ void rotateDownstreamStreamLocked()
     frameSequence = 0;
 }
 
-void beginTempPreparing(const uint8_t* mac, uint32_t surveyDurationSeconds)
+void beginTempPreparing(const uint8_t* mac)
 {
     const uint32_t now = millis();
     portENTER_CRITICAL(&sourceMux);
@@ -218,8 +223,7 @@ void beginTempPreparing(const uint8_t* mac, uint32_t surveyDurationSeconds)
     std::memcpy(rtcmSource.tempBaseMac, mac, sizeof(rtcmSource.tempBaseMac));
     rtcmSource.lastTempFrameAtMs = 0;
     rtcmSource.readyCycles = 0;
-    tempSurveyReadyAtMs = now + surveyDurationSeconds * 1000UL +
-                          TEMP_RTCM_SURVEY_GUARD_MS;
+    tempFixedReadyAtMs = now + TEMP_RTCM_FIXED_GUARD_MS;
     tempCycleMsmMask = 0;
     tempCycleStarted = false;
     portEXIT_CRITICAL(&sourceMux);
@@ -229,9 +233,8 @@ void beginTempPreparing(const uint8_t* mac, uint32_t surveyDurationSeconds)
     if (tempRtcmRxQueue != nullptr) {
         xQueueReset(tempRtcmRxQueue);
     }
-    Serial.printf("[BASE][RTCM_SOURCE] state=TEMP_PREPARING temp=%s survey_s=%lu\n",
-                  macToString(mac).c_str(),
-                  static_cast<unsigned long>(surveyDurationSeconds));
+    Serial.printf("[BASE][RTCM_SOURCE] state=TEMP_PREPARING temp=%s mode=fixed_ecef\n",
+                  macToString(mac).c_str());
 }
 
 void switchToLocalFallback(const char* reason)
@@ -319,7 +322,7 @@ void updateTempReadiness(uint16_t messageId, uint32_t now)
     bool shouldActivate = false;
     portENTER_CRITICAL(&sourceMux);
     if (rtcmSource.state == BaseRtcmSourceState::TempPreparing &&
-        static_cast<int32_t>(now - tempSurveyReadyAtMs) >= 0) {
+        static_cast<int32_t>(now - tempFixedReadyAtMs) >= 0) {
         if (messageId == 1006) {
             if (tempCycleStarted && tempCycleMsmMask == 0x0F) {
                 if (rtcmSource.readyCycles < UINT8_MAX) {
@@ -447,6 +450,7 @@ bool storeLatestRoverLlh(const uint8_t* roverMac,
                          int32_t latitudeE7,
                          int32_t longitudeE7,
                          int32_t heightMm,
+                         int32_t ellipsoidHeightMm,
                          uint8_t fixQuality)
 {
     const uint32_t receivedAtMs = millis();
@@ -484,6 +488,7 @@ bool storeLatestRoverLlh(const uint8_t* roverMac,
     latest.latitudeE7 = latitudeE7;
     latest.longitudeE7 = longitudeE7;
     latest.heightMm = heightMm;
+    latest.ellipsoidHeightMm = ellipsoidHeightMm;
     latest.fixQuality = fixQuality;
     latest.usesTempBase = source.state == BaseRtcmSourceState::TempActive;
     if (latest.usesTempBase) {
@@ -792,8 +797,8 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
 const char* gnssCommandName(uint8_t commandId)
 {
     switch (commandId) {
-    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN:
-        return "switch_to_base_survey_in";
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF:
+        return "switch_to_base_fixed_ecef";
     case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
         return "switch_to_rover";
     default:
@@ -984,6 +989,7 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
                                  packet.latitudeE7,
                                  packet.longitudeE7,
                                  packet.heightMm,
+                                 packet.ellipsoidHeightMm,
                                  packet.fixQuality)) {
             incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
             return;
@@ -1013,6 +1019,7 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
                                  packet.latitudeE7,
                                  packet.longitudeE7,
                                  packet.heightMm,
+                                 packet.ellipsoidHeightMm,
                                  packet.fixQuality)) {
             incrementStat(&BaseEspnowStats::llhStatusCapacityDrops);
             return;
@@ -1060,6 +1067,9 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         event.completedStep = packet.completedStep;
         event.totalSteps = packet.totalSteps;
         event.detailCode = packet.detailCode;
+        event.ecefXmm = expectedGnssCommandEcefXmm;
+        event.ecefYmm = expectedGnssCommandEcefYmm;
+        event.ecefZmm = expectedGnssCommandEcefZmm;
         event.receivedAtMs = millis();
         if (gnssCommandResultQueue != nullptr &&
             xQueueSend(gnssCommandResultQueue, &event, 0) != pdTRUE) {
@@ -1080,7 +1090,7 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
                           macToString(sourceMac).c_str(),
                           gnssCommandName(packet.commandId));
         } else if (packet.commandId ==
-                   RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN) {
+                   RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF) {
             switchToLocalFallback("temp_base_command_rejected");
         }
         if (gnssCommandResultSemaphore != nullptr) {
@@ -1419,6 +1429,9 @@ void queueLocalGnssCommandTimeout(const QueuedGnssCommand& command)
     std::memcpy(event.roverMac, command.roverMac, sizeof(event.roverMac));
     event.transactionId = command.transactionId;
     event.commandId = command.commandId;
+    event.ecefXmm = command.ecefXmm;
+    event.ecefYmm = command.ecefYmm;
+    event.ecefZmm = command.ecefZmm;
     event.receivedAtMs = millis();
     event.responseTimedOut = true;
     if (gnssCommandResultQueue != nullptr &&
@@ -1447,6 +1460,9 @@ void processNextGnssCommand()
                 sizeof(expectedGnssCommandMac));
     expectedGnssCommandTransactionId = command.transactionId;
     expectedGnssCommandId = command.commandId;
+    expectedGnssCommandEcefXmm = command.ecefXmm;
+    expectedGnssCommandEcefYmm = command.ecefYmm;
+    expectedGnssCommandEcefZmm = command.ecefZmm;
     waitingForGnssCommandResult = true;
     portEXIT_CRITICAL(&gnssCommandMux);
 
@@ -1456,15 +1472,17 @@ void processNextGnssCommand()
     packet.common.packetType = RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_REQUEST;
     packet.networkId = ESPNOW_NETWORK_ID;
     packet.transactionId = command.transactionId;
-    packet.surveyDurationSeconds = command.surveyDurationSeconds;
+    packet.ecefXmm = command.ecefXmm;
+    packet.ecefYmm = command.ecefYmm;
+    packet.ecefZmm = command.ecefZmm;
     packet.commandId = command.commandId;
     packet.targetPort = RTCM_ESPNOW_GNSS_PORT_COM2;
     packet.authTag = rtcmEspNowPairingAuthTag(packet,
                                               ESPNOW_PAIRING_KEY,
                                               sizeof(ESPNOW_PAIRING_KEY));
 
-    if (command.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN) {
-        beginTempPreparing(command.roverMac, command.surveyDurationSeconds);
+    if (command.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF) {
+        beginTempPreparing(command.roverMac);
     }
 
     bool resultReceived = false;
@@ -1481,11 +1499,14 @@ void processNextGnssCommand()
             continue;
         }
         incrementStat(&BaseEspnowStats::gnssCommandSent);
-        Serial.printf("[BASE][GNSS_CMD] Sent action=%s txn=%lu rover=%s duration_s=%lu attempt=%u\n",
+        Serial.printf("[BASE][GNSS_CMD] Sent action=%s txn=%lu rover=%s "
+                      "ecef_m=(%.4f,%.4f,%.4f) attempt=%u\n",
                       gnssCommandName(command.commandId),
                       static_cast<unsigned long>(command.transactionId),
                       macToString(command.roverMac).c_str(),
-                      static_cast<unsigned long>(command.surveyDurationSeconds),
+                      static_cast<double>(command.ecefXmm) / 1000.0,
+                      static_cast<double>(command.ecefYmm) / 1000.0,
+                      static_cast<double>(command.ecefZmm) / 1000.0,
                       attempt + 1);
         resultReceived =
             xSemaphoreTake(gnssCommandResultSemaphore,
@@ -1497,7 +1518,7 @@ void processNextGnssCommand()
     portEXIT_CRITICAL(&gnssCommandMux);
     if (!resultReceived) {
         incrementStat(&BaseEspnowStats::gnssCommandTimeouts);
-        if (command.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN) {
+        if (command.commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF) {
             switchToLocalFallback("temp_base_command_timeout");
         }
         queueLocalGnssCommandTimeout(command);
@@ -1641,17 +1662,17 @@ void baseEspNowLoop()
 {
     const uint32_t sourceNow = millis();
     BaseRtcmSourceSnapshot sourceSnapshot{};
-    uint32_t surveyReadyAt = 0;
+    uint32_t fixedReadyAt = 0;
     portENTER_CRITICAL(&sourceMux);
     sourceSnapshot = rtcmSource;
-    surveyReadyAt = tempSurveyReadyAtMs;
+    fixedReadyAt = tempFixedReadyAtMs;
     portEXIT_CRITICAL(&sourceMux);
     if (sourceSnapshot.state == BaseRtcmSourceState::TempActive &&
         sourceSnapshot.lastTempFrameAtMs != 0 &&
         sourceNow - sourceSnapshot.lastTempFrameAtMs > TEMP_RTCM_SOURCE_TIMEOUT_MS) {
         switchToLocalFallback("temp_rtcm_timeout");
     } else if (sourceSnapshot.state == BaseRtcmSourceState::TempPreparing &&
-               static_cast<int32_t>(sourceNow - surveyReadyAt) >= 0 &&
+               static_cast<int32_t>(sourceNow - fixedReadyAt) >= 0 &&
                (sourceSnapshot.lastTempFrameAtMs == 0 ||
                 sourceNow - sourceSnapshot.lastTempFrameAtMs >
                     TEMP_RTCM_PREPARING_TIMEOUT_MS)) {
@@ -1845,16 +1866,25 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
     uint8_t commandId,
     const uint8_t* requestedTargetMac,
     uint32_t transactionId,
-    uint32_t surveyDurationSeconds,
+    int64_t ecefXmm,
+    int64_t ecefYmm,
+    int64_t ecefZmm,
     uint8_t selectedTargetMac[6])
 {
+    const bool validEcef =
+        ecefXmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        ecefXmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        ecefYmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        ecefYmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        ecefZmm >= -RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        ecefZmm <= RTCM_ESPNOW_ECEF_MM_LIMIT &&
+        (ecefXmm < -90000 || ecefXmm > 90000);
     const bool validArguments =
         transactionId != 0 &&
-        ((commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN &&
-          surveyDurationSeconds >= RTCM_ESPNOW_GNSS_SURVEY_MIN_SECONDS &&
-          surveyDurationSeconds <= RTCM_ESPNOW_GNSS_SURVEY_MAX_SECONDS) ||
+        ((commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF &&
+          validEcef) ||
          (commandId == RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER &&
-          surveyDurationSeconds == 0));
+          ecefXmm == 0 && ecefYmm == 0 && ecefZmm == 0));
     if (!validArguments) {
         return BaseGnssCommandQueueResult::InvalidArgument;
     }
@@ -1887,7 +1917,9 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
         return BaseGnssCommandQueueResult::NoPairedRover;
     }
     command.transactionId = transactionId;
-    command.surveyDurationSeconds = surveyDurationSeconds;
+    command.ecefXmm = ecefXmm;
+    command.ecefYmm = ecefYmm;
+    command.ecefZmm = ecefZmm;
     command.commandId = commandId;
     if (xQueueSend(gnssCommandQueue, &command, 0) != pdTRUE) {
         return BaseGnssCommandQueueResult::QueueFull;
@@ -1899,19 +1931,6 @@ static BaseGnssCommandQueueResult queueRoverGnssCommand(
     return BaseGnssCommandQueueResult::Queued;
 }
 
-BaseGnssCommandQueueResult baseEspNowQueueFirstRoverBaseSurveyIn(
-    uint32_t transactionId,
-    uint32_t surveyDurationSeconds,
-    uint8_t targetMac[6])
-{
-    return queueRoverGnssCommand(
-        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN,
-        nullptr,
-        transactionId,
-        surveyDurationSeconds,
-        targetMac);
-}
-
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
     uint32_t transactionId,
     uint8_t targetMac[6])
@@ -1921,21 +1940,9 @@ BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
         nullptr,
         transactionId,
         0,
+        0,
+        0,
         targetMac);
-}
-
-BaseGnssCommandQueueResult baseEspNowQueueRoverBaseSurveyIn(
-    const uint8_t requestedTargetMac[6],
-    uint32_t transactionId,
-    uint32_t surveyDurationSeconds,
-    uint8_t selectedTargetMac[6])
-{
-    return queueRoverGnssCommand(
-        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN,
-        requestedTargetMac,
-        transactionId,
-        surveyDurationSeconds,
-        selectedTargetMac);
 }
 
 BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
@@ -1948,7 +1955,33 @@ BaseGnssCommandQueueResult baseEspNowQueueRoverMode(
         requestedTargetMac,
         transactionId,
         0,
+        0,
+        0,
         selectedTargetMac);
+}
+
+BaseGnssCommandQueueResult baseEspNowQueueRoverBaseFixedEcef(
+    const uint8_t requestedTargetMac[6],
+    uint32_t transactionId,
+    int64_t ecefXmm,
+    int64_t ecefYmm,
+    int64_t ecefZmm,
+    uint8_t selectedTargetMac[6])
+{
+    return queueRoverGnssCommand(
+        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF,
+        requestedTargetMac,
+        transactionId,
+        ecefXmm,
+        ecefYmm,
+        ecefZmm,
+        selectedTargetMac);
+}
+
+bool baseEspNowIsDirectRoverPaired(const uint8_t targetMac[6])
+{
+    size_t ignoredIndex = 0;
+    return targetMac != nullptr && findRoverPeerIndex(targetMac, ignoredIndex);
 }
 
 bool baseEspNowPopGnssCommandResult(BaseGnssCommandResultEvent& result)

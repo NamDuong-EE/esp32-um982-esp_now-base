@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
+#include <cmath>
 #include <cstring>
 
 #include "Prog_Config.h"
@@ -32,6 +33,16 @@ bool previousInternetConnected = false;
 bool previousMqttConnected = false;
 bool hasPendingGnssCommandResult = false;
 BaseGnssCommandResultEvent pendingGnssCommandResult{};
+
+struct PendingFixedBaseCommand {
+    uint8_t targetMac[6] = {};
+    uint32_t transactionId = 0;
+    uint32_t requestedAtMs = 0;
+    uint32_t timeoutMs = 0;
+    bool active = false;
+};
+
+PendingFixedBaseCommand pendingFixedBaseCommand{};
 
 struct PublishedLlhState {
     uint8_t mac[6] = {};
@@ -80,8 +91,8 @@ bool credentialsConfigured()
 const char* gnssCommandAction(uint8_t commandId)
 {
     switch (commandId) {
-    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_SURVEY_IN:
-        return "switch_to_base_survey_in";
+    case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF:
+        return "switch_to_base_fixed_ecef";
     case RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER:
         return "switch_to_rover";
     default:
@@ -122,6 +133,126 @@ bool parseUnicastMac(const char* text, uint8_t mac[6])
     return !allZero && (mac[0] & 0x01U) == 0;
 }
 
+bool macEquals(const uint8_t left[6], const uint8_t right[6])
+{
+    return left != nullptr && right != nullptr && std::memcmp(left, right, 6) == 0;
+}
+
+void geodeticToEcef(double latitudeDegrees,
+                    double longitudeDegrees,
+                    double ellipsoidHeightM,
+                    double ecefM[3])
+{
+    constexpr double reWgs84 = 6378137.0;
+    constexpr double feWgs84 = 1.0 / 298.257223563;
+    constexpr double degreesToRadians = 0.017453292519943295769;
+    const double latitude = latitudeDegrees * degreesToRadians;
+    const double longitude = longitudeDegrees * degreesToRadians;
+    const double sinLatitude = std::sin(latitude);
+    const double cosLatitude = std::cos(latitude);
+    const double sinLongitude = std::sin(longitude);
+    const double cosLongitude = std::cos(longitude);
+    const double eccentricitySquared = feWgs84 * (2.0 - feWgs84);
+    const double primeVerticalRadius =
+        reWgs84 / std::sqrt(1.0 - eccentricitySquared *
+                                     sinLatitude * sinLatitude);
+
+    ecefM[0] = (primeVerticalRadius + ellipsoidHeightM) *
+               cosLatitude * cosLongitude;
+    ecefM[1] = (primeVerticalRadius + ellipsoidHeightM) *
+               cosLatitude * sinLongitude;
+    ecefM[2] = (primeVerticalRadius * (1.0 - eccentricitySquared) +
+                ellipsoidHeightM) * sinLatitude;
+}
+
+void processPendingFixedBaseCommand(uint32_t now)
+{
+    if (!pendingFixedBaseCommand.active) {
+        return;
+    }
+    if (now - pendingFixedBaseCommand.requestedAtMs >
+        pendingFixedBaseCommand.timeoutMs) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu target="
+                      "%02X:%02X:%02X:%02X:%02X:%02X result=rtk_fixed_timeout\n",
+                      static_cast<unsigned long>(
+                          pendingFixedBaseCommand.transactionId),
+                      pendingFixedBaseCommand.targetMac[0],
+                      pendingFixedBaseCommand.targetMac[1],
+                      pendingFixedBaseCommand.targetMac[2],
+                      pendingFixedBaseCommand.targetMac[3],
+                      pendingFixedBaseCommand.targetMac[4],
+                      pendingFixedBaseCommand.targetMac[5]);
+        pendingFixedBaseCommand = {};
+        return;
+    }
+
+    BaseRoverLlhStatus snapshots[ESPNOW_MAX_LLH_SOURCES] = {};
+    const size_t count =
+        baseEspNowCopyLatestRoverLlh(snapshots, ESPNOW_MAX_LLH_SOURCES);
+    const BaseRoverLlhStatus* selected = nullptr;
+    for (size_t index = 0; index < count; ++index) {
+        if (snapshots[index].valid && !snapshots[index].viaRelay &&
+            macEquals(snapshots[index].mac,
+                      pendingFixedBaseCommand.targetMac)) {
+            selected = &snapshots[index];
+            break;
+        }
+    }
+    if (selected == nullptr || selected->fixQuality != 4 ||
+        now - selected->receivedAtMs > TEMP_BASE_FIXED_LLH_MAX_AGE_MS) {
+        return;
+    }
+
+    const double latitude =
+        static_cast<double>(selected->latitudeE7) /
+        RTCM_ESPNOW_LLH_COORDINATE_SCALE;
+    const double longitude =
+        static_cast<double>(selected->longitudeE7) /
+        RTCM_ESPNOW_LLH_COORDINATE_SCALE;
+    const double ellipsoidHeightM =
+        static_cast<double>(selected->ellipsoidHeightMm) /
+        RTCM_ESPNOW_LLH_HEIGHT_SCALE;
+    double ecefM[3] = {};
+    geodeticToEcef(latitude, longitude, ellipsoidHeightM, ecefM);
+    const int64_t ecefXmm = static_cast<int64_t>(std::llround(ecefM[0] * 1000.0));
+    const int64_t ecefYmm = static_cast<int64_t>(std::llround(ecefM[1] * 1000.0));
+    const int64_t ecefZmm = static_cast<int64_t>(std::llround(ecefM[2] * 1000.0));
+
+    uint8_t selectedMac[6] = {};
+    const BaseGnssCommandQueueResult queueResult =
+        baseEspNowQueueRoverBaseFixedEcef(
+            pendingFixedBaseCommand.targetMac,
+            pendingFixedBaseCommand.transactionId,
+            ecefXmm,
+            ecefYmm,
+            ecefZmm,
+            selectedMac);
+    if (queueResult == BaseGnssCommandQueueResult::QueueFull ||
+        queueResult == BaseGnssCommandQueueResult::NotReady) {
+        return;
+    }
+    if (queueResult != BaseGnssCommandQueueResult::Queued) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu result=%s\n",
+                      static_cast<unsigned long>(
+                          pendingFixedBaseCommand.transactionId),
+                      baseGnssCommandQueueResultToString(queueResult));
+        pendingFixedBaseCommand = {};
+        return;
+    }
+
+    Serial.printf("[BASE][ECEF] txn=%lu target=%02X:%02X:%02X:%02X:%02X:%02X "
+                  "llh=(%.7f,%.7f,%.3f) ecef_m=(%.4f,%.4f,%.4f)\n",
+                  static_cast<unsigned long>(
+                      pendingFixedBaseCommand.transactionId),
+                  selectedMac[0], selectedMac[1], selectedMac[2],
+                  selectedMac[3], selectedMac[4], selectedMac[5],
+                  latitude, longitude, ellipsoidHeightM,
+                  ecefM[0], ecefM[1], ecefM[2]);
+    pendingFixedBaseCommand = {};
+}
+
 void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 {
     constexpr unsigned int maxLogLength = 160;
@@ -148,10 +279,10 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
     }
 
     const char* action = document["action"] | "";
-    const bool switchToBase =
-        std::strcmp(action, "switch_to_base_survey_in") == 0;
+    const bool switchToBaseFixed =
+        std::strcmp(action, "switch_to_base_fixed_ecef") == 0;
     const bool switchToRover = std::strcmp(action, "switch_to_rover") == 0;
-    if (!switchToBase && !switchToRover) {
+    if (!switchToBaseFixed && !switchToRover) {
         incrementStat(&NetworkMqttStats::commandsRejected);
         Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] Unsupported action=%s\n", action);
         return;
@@ -163,10 +294,6 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
             transactionId = esp_random();
         } while (transactionId == 0);
     }
-    const uint32_t durationSeconds = switchToBase
-                                         ? (document["duration_s"] |
-                                            MQTT_DEFAULT_SURVEY_DURATION_SECONDS)
-                                         : 0;
     const JsonVariantConst targetMacValue = document["target_mac"];
     const bool hasRequestedTarget = !targetMacValue.isNull();
     uint8_t requestedTargetMac[6] = {};
@@ -178,16 +305,61 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
                       static_cast<unsigned long>(transactionId));
         return;
     }
+    if (switchToBaseFixed) {
+        if (!hasRequestedTarget) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "target_mac required for fixed ECEF\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        if (!baseEspNowIsDirectRoverPaired(requestedTargetMac)) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "result=target_not_paired\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        if (pendingFixedBaseCommand.active) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "result=fixed_command_pending\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        const uint32_t timeoutSeconds =
+            document["fix_timeout_s"] |
+            TEMP_BASE_FIXED_WAIT_DEFAULT_SECONDS;
+        if (timeoutSeconds == 0 ||
+            timeoutSeconds > TEMP_BASE_FIXED_WAIT_MAX_SECONDS) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "invalid fix_timeout_s\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        std::memcpy(pendingFixedBaseCommand.targetMac,
+                    requestedTargetMac,
+                    sizeof(pendingFixedBaseCommand.targetMac));
+        pendingFixedBaseCommand.transactionId = transactionId;
+        pendingFixedBaseCommand.requestedAtMs = millis();
+        pendingFixedBaseCommand.timeoutMs = timeoutSeconds * 1000UL;
+        pendingFixedBaseCommand.active = true;
+        Serial.printf("[BASE][MQTT][GNSS_CMD] Waiting RTK Fixed txn=%lu "
+                      "target=%02X:%02X:%02X:%02X:%02X:%02X timeout_s=%lu\n",
+                      static_cast<unsigned long>(transactionId),
+                      requestedTargetMac[0], requestedTargetMac[1],
+                      requestedTargetMac[2], requestedTargetMac[3],
+                      requestedTargetMac[4], requestedTargetMac[5],
+                      static_cast<unsigned long>(timeoutSeconds));
+        return;
+    }
 
     uint8_t targetMac[6] = {};
-    const BaseGnssCommandQueueResult queueResult = switchToBase
-        ? baseEspNowQueueRoverBaseSurveyIn(hasRequestedTarget ? requestedTargetMac : nullptr,
-                                           transactionId,
-                                           durationSeconds,
-                                           targetMac)
-        : baseEspNowQueueRoverMode(hasRequestedTarget ? requestedTargetMac : nullptr,
-                                   transactionId,
-                                   targetMac);
+    const BaseGnssCommandQueueResult queueResult =
+        baseEspNowQueueRoverMode(hasRequestedTarget ? requestedTargetMac : nullptr,
+                                 transactionId,
+                                 targetMac);
     if (queueResult != BaseGnssCommandQueueResult::Queued) {
         incrementStat(&NetworkMqttStats::commandsRejected);
         Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu result=%s\n",
@@ -195,11 +367,22 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
                       baseGnssCommandQueueResultToString(queueResult));
         return;
     }
+    if (pendingFixedBaseCommand.active &&
+        macEquals(targetMac, pendingFixedBaseCommand.targetMac)) {
+        Serial.printf("[BASE][MQTT][GNSS_CMD] Cancel pending fixed ECEF txn=%lu "
+                      "target=%02X:%02X:%02X:%02X:%02X:%02X replacement=%s\n",
+                      static_cast<unsigned long>(
+                          pendingFixedBaseCommand.transactionId),
+                      targetMac[0], targetMac[1], targetMac[2],
+                      targetMac[3], targetMac[4], targetMac[5],
+                      action);
+        pendingFixedBaseCommand = {};
+    }
 
-    Serial.printf("[BASE][MQTT][GNSS_CMD] Queued txn=%lu action=%s duration_s=%lu target=%02X:%02X:%02X:%02X:%02X:%02X selection=%s\n",
+    Serial.printf("[BASE][MQTT][GNSS_CMD] Queued txn=%lu action=%s "
+                  "target=%02X:%02X:%02X:%02X:%02X:%02X selection=%s\n",
                   static_cast<unsigned long>(transactionId),
                   action,
-                  static_cast<unsigned long>(durationSeconds),
                   targetMac[0], targetMac[1], targetMac[2],
                   targetMac[3], targetMac[4], targetMac[5],
                   hasRequestedTarget ? "mqtt" : "first_paired");
@@ -397,11 +580,15 @@ void publishLatestRoverLlh(uint32_t now)
             static_cast<double>(status.longitudeE7) / RTCM_ESPNOW_LLH_COORDINATE_SCALE;
         const double heightM =
             static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
+        const double ellipsoidHeightM =
+            static_cast<double>(status.ellipsoidHeightMm) /
+            RTCM_ESPNOW_LLH_HEIGHT_SCALE;
         snprintf(payload,
                  sizeof(payload),
                  "{\"rover_mac\":\"%s\",\"sequence\":%lu,"
                  "\"latitude\":%.7f,\"longitude\":%.7f,"
-                 "\"height_m\":%.3f,\"fix_quality\":%u,"
+                 "\"height_m\":%.3f,\"ellipsoid_height_m\":%.3f,"
+                 "\"fix_quality\":%u,"
                  "\"via_relay\":%s,"
                  "\"relay_mac\":\"%s\",\"rtcm_source\":\"%s\","
                  "\"temp_base_mac\":%s,\"rtcm_source_epoch\":%lu,"
@@ -411,6 +598,7 @@ void publishLatestRoverLlh(uint32_t now)
                  latitude,
                  longitude,
                  heightM,
+                 ellipsoidHeightM,
                  static_cast<unsigned>(status.fixQuality),
                  status.viaRelay ? "true" : "false",
                  relayMacText,
@@ -479,13 +667,23 @@ void publishGnssCommandResult(uint32_t now)
              pendingGnssCommandResult.roverMac[3],
              pendingGnssCommandResult.roverMac[4],
              pendingGnssCommandResult.roverMac[5]);
-    char resultPayload[320] = {};
+    char ecefJson[128] = "null";
+    if (pendingGnssCommandResult.commandId ==
+        RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_BASE_FIXED_ECEF) {
+        snprintf(ecefJson,
+                 sizeof(ecefJson),
+                 "{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f}",
+                 static_cast<double>(pendingGnssCommandResult.ecefXmm) / 1000.0,
+                 static_cast<double>(pendingGnssCommandResult.ecefYmm) / 1000.0,
+                 static_cast<double>(pendingGnssCommandResult.ecefZmm) / 1000.0);
+    }
+    char resultPayload[448] = {};
     snprintf(resultPayload,
              sizeof(resultPayload),
              "{\"transaction_id\":%lu,\"target_mac\":\"%s\","
              "\"action\":\"%s\",\"status\":\"%s\","
              "\"completed_step\":%u,\"total_steps\":%u,"
-             "\"detail_code\":%u,\"result_age_ms\":%lu}",
+             "\"detail_code\":%u,\"ecef_m\":%s,\"result_age_ms\":%lu}",
              static_cast<unsigned long>(pendingGnssCommandResult.transactionId),
              macText,
              gnssCommandAction(pendingGnssCommandResult.commandId),
@@ -493,6 +691,7 @@ void publishGnssCommandResult(uint32_t now)
              pendingGnssCommandResult.completedStep,
              pendingGnssCommandResult.totalSteps,
              pendingGnssCommandResult.detailCode,
+             ecefJson,
              static_cast<unsigned long>(now - pendingGnssCommandResult.receivedAtMs));
 
     if (!mqtt.publish(MQTT_TOPIC_COMMAND_RESULT, resultPayload, false)) {
@@ -530,6 +729,7 @@ void setupNetworkMqtt()
 
 void networkMqttLoop()
 {
+    processPendingFixedBaseCommand(millis());
     const NetworkMqttStats snapshot = getNetworkMqttStats();
     if (!snapshot.configured) {
         vTaskDelay(pdMS_TO_TICKS(1000));

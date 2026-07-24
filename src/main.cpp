@@ -7,6 +7,7 @@
 #include "functions/NetworkMqttManager.h"
 #include "functions/Rtcm_Frame_Reader.h"
 #include "hardware/BaseEspnow_sender.h"
+#include <math>
 
 namespace {
 struct RtcmFrameEnvelope {
@@ -465,6 +466,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                 RTCM_ESPNOW_LLH_COORDINATE_SCALE;
             const double heightM =
                 static_cast<double>(status.heightMm) / RTCM_ESPNOW_LLH_HEIGHT_SCALE;
+            const double ellipsoidHeightM =
+                static_cast<double>(status.ellipsoidHeightMm) /
+                RTCM_ESPNOW_LLH_HEIGHT_SCALE;
             char relayMacText[18] = {};
             if (status.viaRelay) {
                 snprintf(relayMacText, sizeof(relayMacText),
@@ -482,13 +486,14 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             }
             Serial.printf(
                 "[BASE][ROVER_LLH] mac=%02X:%02X:%02X:%02X:%02X:%02X seq=%lu "
-                "lat=%.7f lon=%.7f height_m=%.3f fix_quality=%u "
+                "lat=%.7f lon=%.7f height_m=%.3f ellipsoid_height_m=%.3f "
+                "fix_quality=%u "
                 "via=%s relay_mac=%s rtcm_source=%s temp_base_mac=%s "
                 "source_epoch=%lu age_ms=%lu\n",
                 status.mac[0], status.mac[1], status.mac[2],
                 status.mac[3], status.mac[4], status.mac[5],
                 static_cast<unsigned long>(status.sequence),
-                latitude, longitude, heightM,
+                latitude, longitude, heightM, ellipsoidHeightM,
                 static_cast<unsigned>(status.fixQuality),
                 status.viaRelay ? "relay" : "direct",
                 relayMacText,
