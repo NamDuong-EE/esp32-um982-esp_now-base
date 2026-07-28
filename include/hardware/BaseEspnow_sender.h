@@ -46,6 +46,9 @@ struct BaseTempRtcmFrame {
     uint16_t length = 0;
     uint16_t messageId = 0;
     uint32_t receivedAtMs = 0;
+    uint8_t sourceMac[6] = {};
+    uint16_t upstreamStreamId = 0;
+    uint32_t upstreamSequence = 0;
     uint8_t data[1029] = {};
 };
 
@@ -108,6 +111,10 @@ struct BaseEspnowStats {
     uint32_t tempQueueDrops = 0;
     uint32_t tempAcksSent = 0;
     uint32_t tempAckFailures = 0;
+    uint32_t tempAcksDeferred = 0;
+    uint32_t tempDeferredDuplicates = 0;
+    uint32_t tempForwardCompleted = 0;
+    uint32_t tempForwardFailed = 0;
     uint32_t sourceSwitches = 0;
     uint32_t sourceFallbacks = 0;
     uint32_t peerCooldownEvents = 0;
@@ -122,6 +129,8 @@ void baseEspNowMarkLocalBaseReady();
 bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length);
 bool baseEspNowShouldForwardLocalRtcm();
 bool baseEspNowPopTempRtcmFrame(BaseTempRtcmFrame& frame, TickType_t waitTicks);
+void baseEspNowCompleteTempRtcmForward(const BaseTempRtcmFrame& frame,
+                                       bool downstreamDelivered);
 BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot();
 const char* baseRtcmSourceStateToString(BaseRtcmSourceState state);
 BaseEspnowStats getBaseEspnowStats();

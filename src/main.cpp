@@ -39,6 +39,8 @@ struct BasePipelineStats {
 
 QueueHandle_t rtcmFrameQueue = nullptr;
 BasePipelineStats pipelineStats{};
+RtcmFrameEnvelope senderEnvelope{};
+BaseTempRtcmFrame senderTempFrame{};
 RtcmMessageStats messageStats[] = {
     {1005, 0, 0},
     {1006, 0, 0},
@@ -221,7 +223,10 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
 {
     uint32_t observedSourceEpoch = getBaseRtcmSourceSnapshot().epoch;
     while (true) {
-        RtcmFrameEnvelope envelope{};
+        RtcmFrameEnvelope& envelope = senderEnvelope;
+        BaseTempRtcmFrame& activeTempFrame = senderTempFrame;
+        envelope = {};
+        activeTempFrame = {};
         BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
         if (source.epoch != observedSourceEpoch) {
             observedSourceEpoch = source.epoch;
@@ -236,15 +241,19 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
         }
 
         bool haveFrame = false;
+        bool hasDeferredTempAck = false;
         const bool fromTemp = source.state == BaseRtcmSourceState::TempActive;
         if (fromTemp) {
-            BaseTempRtcmFrame tempFrame{};
-            if (baseEspNowPopTempRtcmFrame(tempFrame, pdMS_TO_TICKS(50))) {
-                envelope.length = tempFrame.length;
-                envelope.messageId = tempFrame.messageId;
-                envelope.receivedAtMs = tempFrame.receivedAtMs;
-                std::memcpy(envelope.data, tempFrame.data, tempFrame.length);
-                baseGnssRoleInjectTempRtcm(tempFrame.data, tempFrame.length);
+            if (baseEspNowPopTempRtcmFrame(activeTempFrame,
+                                          pdMS_TO_TICKS(50))) {
+                hasDeferredTempAck = true;
+                envelope.length = activeTempFrame.length;
+                envelope.messageId = activeTempFrame.messageId;
+                envelope.receivedAtMs = activeTempFrame.receivedAtMs;
+                std::memcpy(envelope.data, activeTempFrame.data,
+                            activeTempFrame.length);
+                baseGnssRoleInjectTempRtcm(activeTempFrame.data,
+                                           activeTempFrame.length);
                 haveFrame = true;
             }
         } else {
@@ -276,6 +285,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             portENTER_CRITICAL(&pipelineStatsMux);
             ++pipelineStats.staleDrops;
             portEXIT_CRITICAL(&pipelineStatsMux);
+            if (hasDeferredTempAck) {
+                baseEspNowCompleteTempRtcmForward(activeTempFrame, false);
+            }
             continue;
         }
 
@@ -287,6 +299,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             ++pipelineStats.rtcmSendFail;
         }
         portEXIT_CRITICAL(&pipelineStatsMux);
+        if (hasDeferredTempAck) {
+            baseEspNowCompleteTempRtcmForward(activeTempFrame, sent);
+        }
     }
 }
 
@@ -331,7 +346,9 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "llh_unknown=%lu llh_capacity_drop=%lu "
             "cmd_queued=%lu cmd_sent=%lu cmd_result=%lu cmd_timeout=%lu cmd_invalid=%lu "
             "temp_frag_rx=%lu temp_frame_ok=%lu temp_invalid=%lu temp_queue_drop=%lu "
-            "temp_ack=%lu temp_ack_fail=%lu source=%s source_epoch=%lu source_switch=%lu "
+            "temp_ack=%lu temp_ack_fail=%lu temp_ack_deferred=%lu temp_ack_wait_dup=%lu "
+            "temp_forward_done=%lu temp_forward_fail=%lu "
+            "source=%s source_epoch=%lu source_switch=%lu "
             "source_fallback=%lu peer_cooldown=%lu peer_skip=%lu peer_recovery=%lu "
             "send_ms=%lu send_max_ms=%lu free_heap=%u\n",
             static_cast<unsigned long>(periodMs),
@@ -386,6 +403,10 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             static_cast<unsigned long>(espnow.tempQueueDrops),
             static_cast<unsigned long>(espnow.tempAcksSent),
             static_cast<unsigned long>(espnow.tempAckFailures),
+            static_cast<unsigned long>(espnow.tempAcksDeferred),
+            static_cast<unsigned long>(espnow.tempDeferredDuplicates),
+            static_cast<unsigned long>(espnow.tempForwardCompleted),
+            static_cast<unsigned long>(espnow.tempForwardFailed),
             baseRtcmSourceStateToString(getBaseRtcmSourceSnapshot().state),
             static_cast<unsigned long>(getBaseRtcmSourceSnapshot().epoch),
             static_cast<unsigned long>(espnow.sourceSwitches),

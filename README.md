@@ -454,6 +454,8 @@ LOCAL_ACTIVE -> TEMP_PREPARING -> TEMP_RESETTING -> TEMP_ACTIVE -> LOCAL_FALLBAC
 
 `TEMP_PREPARING` không làm gián đoạn Rover: Base vẫn forward RTCM local trong guard 3000 ms và đợi hai chu kỳ đủ `1006`, `1074`, `1084`, `1094`, `1124`. Deadline readiness là 15000 ms tính từ lúc bắt đầu cấu hình Temporary Base; `lastTempFrameAtMs == 0` không còn làm Base hủy ngay sau guard 3 giây. Sau đó `TEMP_RESETTING` dừng phát RTCM cũ và gửi command ID `4`. Rover thực thi `CONFIG RTK DISABLE`, chặn ghi mọi RTCM đang chờ nhưng vẫn parse GGA và gửi ECEF status. Relay fan-out lệnh có auth tới các Rover con. Mỗi nhánh phải ACK command và từng MAC Rover phải gửi một ECEF/GGA mới có `fix_quality` khác 4/5 sau ACK. Cohort gồm toàn bộ Rover trực tiếp đã pair và các Rover con từng có status; status cũ hoặc thiết bị tạm offline vẫn được giữ trong gate thay vì bị bỏ qua. Chỉ khi toàn bộ cohort đạt điều kiện, Base queue command ID `5` (`CONFIG RTK USER_DEFAULTS`) để resume RTK, tạo stream mới và vào `TEMP_ACTIVE`; `rtcmEnabled` của từng nhánh chỉ bật sau ACK resume. Nếu timeout 45 giây hoặc mất RTCM temp, Base cũng resume RTK trước khi rollback về local và yêu cầu temp trở lại Rover.
 
+ACK uplink type `11` có hai thời điểm khác nhau theo state. Trong `TEMP_PREPARING` và `TEMP_RESETTING`, Base ACK ngay sau khi validate frame để Temporary Base tiếp tục phát đủ chu kỳ readiness. Trong `TEMP_ACTIVE`, Base lưu MAC nguồn, upstream stream ID và upstream sequence cùng frame trong queue, chờ sender hoàn tất lượt multi-unicast xuống toàn bộ Rover đủ điều kiện rồi mới ACK Temporary Base. ACK được gửi sau khi lượt forward kết thúc kể cả khi một peer thất bại; kết quả downstream vẫn được ghi bằng counter riêng và failure isolation/cooldown tiếp tục xử lý peer lỗi. Duplicate cùng upstream sequence trong lúc chờ không được enqueue hoặc forward lần hai; nếu ACK cuối bị mất, duplicate sau completion được ACK lại ngay.
+
 Không dùng riêng `CONFIG RTK RESET` làm cổng handover vì application ACK chỉ xác nhận ESP32 đã ghi UART, không xác nhận UM980/982 đã rời RTK Float. Ngoài ra receiver có thể giữ correction cũ theo RTK timeout lâu hơn timeout handover. Cặp DISABLE/RESUME tạo một khoảng non-RTK quan sát được và ngăn correction cũ lọt qua lúc đổi stream.
 
 Temporary Base giữ queue 3 frame theo chính sách ưu tiên correction mới, gửi fragment tối đa 234 byte tới đúng MAC Base đã pair và retry nguyên frame một lần nếu thiếu ACK. Base có queue RX fragment 16 packet, reassembly timeout 1500 ms và queue forwarding temp 3 frame. Khi `TEMP_ACTIVE` không có frame temp hợp lệ trong 3500 ms, Base chuyển `LOCAL_FALLBACK`, xóa queue temp, đổi source epoch/stream và chỉ phát các frame local mới.
@@ -900,3 +902,14 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - [x] Build Rover thường SUCCESS: RAM 47.788/327.680 byte (14,6%), Flash 806.025/1.310.720 byte (61,5%).
 - [x] Build Relay SUCCESS: RAM 48.532/327.680 byte (14,8%), Flash 828.989/1.310.720 byte (63,2%); native protocol test 8/8 PASSED.
 - [ ] Chưa kiểm thử end-to-end trên UM980 thật: cần nạp đồng bộ cả ba firmware và xác nhận log `TEMP_RESETTING`, `TEMP_ACTIVE`, correction delta và fallback.
+
+### 2026-07-25
+
+- [x] Đổi flow-control Temporary Base trong `TEMP_ACTIVE`: không ACK ngay khi enqueue; chỉ gửi `TEMP_RTCM_ACK` sau khi `RTCM Sender` hoàn tất lượt forward frame xuống các Rover.
+- [x] Thêm metadata `sourceMac`, `upstreamStreamId`, `upstreamSequence` vào queue temp và state chống duplicate. Retry của Temporary Base trong lúc chờ không tạo thêm bản sao downstream; duplicate sau completion dùng để gửi lại ACK nếu ACK trước bị mất.
+- [x] Giữ ACK ngay trong `TEMP_PREPARING/TEMP_RESETTING` để readiness và reset gate không bị khóa. ACK sau forward vẫn được gửi khi downstream thất bại để stop-and-wait không mắc kẹt vô hạn.
+- [x] Health thêm `temp_ack_deferred`, `temp_ack_wait_dup`, `temp_forward_done`, `temp_forward_fail`.
+- [x] Chuyển buffer làm việc của `RTCM Sender` sang RAM tĩnh. ELF xác nhận stack frame sender chỉ 96 byte; stack frame `Temp RTCM RX` 2448 byte trên stack task 8192 byte.
+- [x] Build Base Wi-Fi SUCCESS: RAM 62.236/327.680 byte (19,0%), Flash 822.129/1.310.720 byte (62,7%).
+- [x] Build Base 4G SUCCESS: RAM 61.164/327.680 byte (18,7%), Flash 811.561/1.310.720 byte (61,9%).
+- [ ] Chưa kiểm thử RF end-to-end: cần so sánh `send_fail`, `frames_dropped`, `temp_ack_wait_dup` và `temp_forward_fail` trước/sau thay đổi trên phần cứng.

@@ -74,6 +74,14 @@ struct ResetCohortBranch {
     bool commandAcked;
 };
 
+struct DeferredTempAckState {
+    bool pending;
+    bool completed;
+    uint8_t sourceMac[6];
+    uint16_t streamId;
+    uint32_t sequence;
+};
+
 BaseEspnowStats stats;
 RoverPeer roverPeers[ESPNOW_MAX_PAIRED_ROVERS] = {};
 BaseRoverEcefStatus latestRoverEcef[ESPNOW_MAX_ECEF_SOURCES] = {};
@@ -84,6 +92,7 @@ portMUX_TYPE ecefMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE pairingMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE sourceMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE resetMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE tempAckMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t streamId = 0;
 uint32_t frameSequence = 0;
 volatile bool lastSendSucceeded = false;
@@ -122,6 +131,7 @@ BaseRoverEcefStatus resetCohortSnapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
 size_t resetCohortCount = 0;
 size_t resetBranchCount = 0;
 uint32_t resetGateStartedAtMs = 0;
+DeferredTempAckState deferredTempAck{};
 
 constexpr uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -193,6 +203,71 @@ bool macEquals(const uint8_t* a, const uint8_t* b)
     return a != nullptr && b != nullptr && std::memcmp(a, b, 6) == 0;
 }
 
+enum class DeferredTempAckMatch : uint8_t {
+    None = 0,
+    Pending,
+    Completed,
+};
+
+void clearDeferredTempAck()
+{
+    portENTER_CRITICAL(&tempAckMux);
+    deferredTempAck = {};
+    portEXIT_CRITICAL(&tempAckMux);
+}
+
+DeferredTempAckMatch matchDeferredTempAck(const uint8_t* sourceMac,
+                                          uint16_t streamId,
+                                          uint32_t sequence)
+{
+    DeferredTempAckMatch match = DeferredTempAckMatch::None;
+    portENTER_CRITICAL(&tempAckMux);
+    if (macEquals(deferredTempAck.sourceMac, sourceMac) &&
+        deferredTempAck.streamId == streamId &&
+        deferredTempAck.sequence == sequence) {
+        if (deferredTempAck.pending) {
+            match = DeferredTempAckMatch::Pending;
+        } else if (deferredTempAck.completed) {
+            match = DeferredTempAckMatch::Completed;
+        }
+    }
+    portEXIT_CRITICAL(&tempAckMux);
+    return match;
+}
+
+bool stageDeferredTempAck(const uint8_t* sourceMac,
+                          uint16_t streamId,
+                          uint32_t sequence)
+{
+    bool staged = false;
+    portENTER_CRITICAL(&tempAckMux);
+    if (!deferredTempAck.pending) {
+        deferredTempAck = {};
+        deferredTempAck.pending = true;
+        std::memcpy(deferredTempAck.sourceMac, sourceMac,
+                    sizeof(deferredTempAck.sourceMac));
+        deferredTempAck.streamId = streamId;
+        deferredTempAck.sequence = sequence;
+        staged = true;
+    }
+    portEXIT_CRITICAL(&tempAckMux);
+    return staged;
+}
+
+void cancelDeferredTempAck(const uint8_t* sourceMac,
+                           uint16_t streamId,
+                           uint32_t sequence)
+{
+    portENTER_CRITICAL(&tempAckMux);
+    if (deferredTempAck.pending &&
+        macEquals(deferredTempAck.sourceMac, sourceMac) &&
+        deferredTempAck.streamId == streamId &&
+        deferredTempAck.sequence == sequence) {
+        deferredTempAck = {};
+    }
+    portEXIT_CRITICAL(&tempAckMux);
+}
+
 String macToString(const uint8_t* mac)
 {
     if (mac == nullptr) {
@@ -260,6 +335,7 @@ void beginTempPreparing(const uint8_t* mac)
     tempCycleStarted = false;
     resetCohortRequested = false;
     portEXIT_CRITICAL(&sourceMux);
+    clearDeferredTempAck();
     if (tempRtcmFrameQueue != nullptr) {
         xQueueReset(tempRtcmFrameQueue);
     }
@@ -303,6 +379,7 @@ void switchToLocalFallback(const char* reason)
     if (!fallback && !preparationCanceled) {
         return;
     }
+    clearDeferredTempAck();
     if (tempRtcmFrameQueue != nullptr) {
         xQueueReset(tempRtcmFrameQueue);
     }
@@ -340,6 +417,7 @@ void activateTempSource()
     epoch = rtcmSource.epoch;
     newId = streamId;
     portEXIT_CRITICAL(&sourceMux);
+    clearDeferredTempAck();
     incrementStat(&BaseEspnowStats::sourceSwitches);
     Serial.printf("[BASE][RTCM_SOURCE] state=TEMP_ACTIVE temp=%s epoch=%lu streamId=%u\n",
                   macToString(mac).c_str(),
@@ -742,7 +820,10 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
         }
 
         bool expectedSource = false;
+        BaseRtcmSourceState currentSourceState =
+            BaseRtcmSourceState::LocalActive;
         portENTER_CRITICAL(&sourceMux);
+        currentSourceState = rtcmSource.state;
         expectedSource = (rtcmSource.state == BaseRtcmSourceState::TempPreparing ||
                           rtcmSource.state == BaseRtcmSourceState::TempResetting ||
                           rtcmSource.state == BaseRtcmSourceState::TempActive) &&
@@ -760,8 +841,26 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
             continue;
         }
 
-        if (haveCompleted && header.streamId == completedStreamId &&
-            header.frameSequence == completedSequence) {
+        if (currentSourceState == BaseRtcmSourceState::TempActive) {
+            const DeferredTempAckMatch ackMatch =
+                matchDeferredTempAck(packet.sourceMac,
+                                     header.streamId,
+                                     header.frameSequence);
+            if (ackMatch != DeferredTempAckMatch::None) {
+                portENTER_CRITICAL(&sourceMux);
+                rtcmSource.lastTempFrameAtMs = millis();
+                portEXIT_CRITICAL(&sourceMux);
+                incrementStat(&BaseEspnowStats::tempDeferredDuplicates);
+                if (ackMatch == DeferredTempAckMatch::Completed) {
+                    sendTempRtcmAck(packet.sourceMac,
+                                    header.streamId,
+                                    header.frameSequence);
+                }
+                continue;
+            }
+        } else if (haveCompleted &&
+                   header.streamId == completedStreamId &&
+                   header.frameSequence == completedSequence) {
             sendTempRtcmAck(packet.sourceMac, header.streamId, header.frameSequence);
             continue;
         }
@@ -822,26 +921,46 @@ bool validateTempFragmentHeader(const RtcmEspNowHeader& header, size_t packetLen
             sourceSnapshot.state == BaseRtcmSourceState::TempPreparing ||
             sourceSnapshot.state == BaseRtcmSourceState::TempResetting;
         if (sourceSnapshot.state == BaseRtcmSourceState::TempActive) {
-            BaseTempRtcmFrame output{};
-            output.length = reassembly.frameLength;
-            output.messageId = messageId;
-            output.receivedAtMs = now;
-            std::memcpy(output.data, reassembly.frame, output.length);
-            accepted = tempRtcmFrameQueue != nullptr &&
-                       xQueueSend(tempRtcmFrameQueue, &output, 0) == pdTRUE;
-            if (!accepted) {
+            const bool staged =
+                stageDeferredTempAck(packet.sourceMac,
+                                     reassembly.streamId,
+                                     reassembly.frameSequence);
+            if (staged) {
+                BaseTempRtcmFrame output{};
+                output.length = reassembly.frameLength;
+                output.messageId = messageId;
+                output.receivedAtMs = now;
+                std::memcpy(output.sourceMac, packet.sourceMac,
+                            sizeof(output.sourceMac));
+                output.upstreamStreamId = reassembly.streamId;
+                output.upstreamSequence = reassembly.frameSequence;
+                std::memcpy(output.data, reassembly.frame, output.length);
+                accepted = tempRtcmFrameQueue != nullptr &&
+                           xQueueSend(tempRtcmFrameQueue, &output, 0) == pdTRUE;
+            } else {
+                accepted = false;
+                incrementStat(&BaseEspnowStats::tempFramesInvalid);
+            }
+            if (!accepted && staged) {
+                cancelDeferredTempAck(packet.sourceMac,
+                                      reassembly.streamId,
+                                      reassembly.frameSequence);
                 incrementStat(&BaseEspnowStats::tempQueueDrops);
             }
         }
 
         if (accepted) {
             incrementStat(&BaseEspnowStats::tempFramesValid);
-            haveCompleted = true;
-            completedStreamId = reassembly.streamId;
-            completedSequence = reassembly.frameSequence;
-            sendTempRtcmAck(packet.sourceMac,
-                            reassembly.streamId,
-                            reassembly.frameSequence);
+            if (sourceSnapshot.state == BaseRtcmSourceState::TempActive) {
+                incrementStat(&BaseEspnowStats::tempAcksDeferred);
+            } else {
+                haveCompleted = true;
+                completedStreamId = reassembly.streamId;
+                completedSequence = reassembly.frameSequence;
+                sendTempRtcmAck(packet.sourceMac,
+                                reassembly.streamId,
+                                reassembly.frameSequence);
+            }
         }
         reassembly = {};
     }
@@ -1914,6 +2033,33 @@ bool baseEspNowPopTempRtcmFrame(BaseTempRtcmFrame& frame, TickType_t waitTicks)
 {
     return tempRtcmFrameQueue != nullptr &&
            xQueueReceive(tempRtcmFrameQueue, &frame, waitTicks) == pdTRUE;
+}
+
+void baseEspNowCompleteTempRtcmForward(const BaseTempRtcmFrame& frame,
+                                       bool downstreamDelivered)
+{
+    bool shouldAck = false;
+    portENTER_CRITICAL(&tempAckMux);
+    if (deferredTempAck.pending &&
+        macEquals(deferredTempAck.sourceMac, frame.sourceMac) &&
+        deferredTempAck.streamId == frame.upstreamStreamId &&
+        deferredTempAck.sequence == frame.upstreamSequence) {
+        deferredTempAck.pending = false;
+        deferredTempAck.completed = true;
+        shouldAck = true;
+    }
+    portEXIT_CRITICAL(&tempAckMux);
+    if (!shouldAck) {
+        return;
+    }
+
+    incrementStat(&BaseEspnowStats::tempForwardCompleted);
+    if (!downstreamDelivered) {
+        incrementStat(&BaseEspnowStats::tempForwardFailed);
+    }
+    sendTempRtcmAck(frame.sourceMac,
+                    frame.upstreamStreamId,
+                    frame.upstreamSequence);
 }
 
 BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot()
