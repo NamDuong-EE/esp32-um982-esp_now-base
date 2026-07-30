@@ -199,10 +199,21 @@ void ensureMqtt()
     const char* user = MQTT_USER[0] == '\0' ? nullptr : MQTT_USER;
     const char* password =
         MQTT_PASSWORD[0] == '\0' ? nullptr : MQTT_PASSWORD;
-    if (mqtt.connect(clientId.c_str(), user, password)) {
+    if (mqtt.connect(clientId.c_str(),
+                     user,
+                     password,
+                     MQTT_TOPIC_STATUS,
+                     0,
+                     true,
+                     "offline")) {
+        const bool statusPublished =
+            mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
         Serial.printf("[4G-GW][MQTT] Connected broker=%s:%u\n",
                       MQTT_HOST,
                       MQTT_PORT);
+        Serial.printf("[4G-GW][MQTT] Status topic=%s online=%s retained=yes\n",
+                      MQTT_TOPIC_STATUS,
+                      statusPublished ? "published" : "publish_failed");
     } else {
         Serial.printf("[4G-GW][MQTT][WARN] Connect failed state=%d\n",
                       mqtt.state());
