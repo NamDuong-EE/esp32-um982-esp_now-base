@@ -22,6 +22,10 @@
 #define CONNECT_USING_4G 0
 #endif
 
+#ifndef CONNECT_USING_UART_GATEWAY
+#define CONNECT_USING_UART_GATEWAY 0
+#endif
+
 #define TCP_IP 0
 #define LORA_SERIAL 1
 
@@ -30,13 +34,13 @@
 #endif
 
 // ==== CHỌN 1 TRONG 2 PHƯƠNG THỨC KẾT NỐI (KHÔNG ĐƯỢC CHỌN CẢ HAI) ====
-#if (!CONNECT_USING_WIFI && !CONNECT_USING_4G)
+#if (!CONNECT_USING_WIFI && !CONNECT_USING_4G && !CONNECT_USING_UART_GATEWAY)
     #warning "Không chọn phương thức kết nối nào! Sẽ sử dụng WiFi."
     #undef CONNECT_USING_WIFI
     #define CONNECT_USING_WIFI 1
 #endif
 
-#if ((CONNECT_USING_WIFI + CONNECT_USING_4G) > 1)
+#if ((CONNECT_USING_WIFI + CONNECT_USING_4G + CONNECT_USING_UART_GATEWAY) > 1)
     #error "Chỉ được chọn một phương thức kết nối! Vui lòng chỉnh sửa DEVICE_CONFIG.h"
 #endif
 

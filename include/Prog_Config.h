@@ -40,8 +40,8 @@
 // UART2 from UM980/UM982 Base to ESP32.
 inline constexpr int LED_PIN = 2;
 inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
-inline constexpr int RX_GNSS = 16; // UM980/UM982 TX2 -> ESP32 RX GPIO16
-inline constexpr int TX_GNSS = 17; // UM980/UM982 RX2 <- ESP32 TX GPIO17
+inline constexpr int RX_GNSS = 26; // UM980/UM982 TX2 -> ESP32 RX GPIO26
+inline constexpr int TX_GNSS = 27; // UM980/UM982 RX2 <- ESP32 TX GPIO27
 inline constexpr uint32_t GNSS_BAUD = 115200;
 inline constexpr size_t GNSS_RX_BUFFER_SIZE = 4096;
 
@@ -75,13 +75,29 @@ inline constexpr uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 2;
 inline constexpr uint16_t MQTT_BUFFER_SIZE = 1024;
 
 // SIM7600 defaults for the future 4G board. Confirm these pins against the PCB.
-inline constexpr int MODEM_RX_PIN = 26; // ESP32 RX <- modem TX.
-inline constexpr int MODEM_TX_PIN = 27; // ESP32 TX -> modem RX.
+inline constexpr int MODEM_RX_PIN = 16; // ESP32 RX <- modem TX.
+inline constexpr int MODEM_TX_PIN = 17; // ESP32 TX -> modem RX.
+// Mirrors the power-on sequence used by Long's SIM7600 implementation:
+// drive the modem control input active for 1 second, release it, then wait
+// for the modem to finish booting before issuing AT commands.
+inline constexpr bool MODEM_POWER_CONTROL_ENABLED = true;
+inline constexpr int MODEM_POWER_CONTROL_PIN = 15;
+inline constexpr bool MODEM_POWER_CONTROL_ACTIVE_HIGH = true;
+inline constexpr uint32_t MODEM_POWER_PULSE_MS = 1000;
+inline constexpr uint32_t MODEM_BOOT_WAIT_MS = 8000;
 inline constexpr uint32_t MODEM_BAUD = 115200;
 inline constexpr uint32_t MODEM_NETWORK_TIMEOUT_MS = 10000;
 inline constexpr char MODEM_APN[] = BASE_MODEM_APN;
 inline constexpr char MODEM_GPRS_USER[] = BASE_MODEM_GPRS_USER;
 inline constexpr char MODEM_GPRS_PASSWORD[] = BASE_MODEM_GPRS_PASSWORD;
+
+// Wired UART bridge between the Wi-Fi/GNSS Base and the dedicated 4G gateway.
+// Wi-Fi/GNSS board: RX16/TX17. 4G board: RX26/TX27.
+inline constexpr int UART_GATEWAY_CLIENT_RX_PIN = 16;
+inline constexpr int UART_GATEWAY_CLIENT_TX_PIN = 17;
+inline constexpr int UART_GATEWAY_MODEM_BOARD_RX_PIN = 26;
+inline constexpr int UART_GATEWAY_MODEM_BOARD_TX_PIN = 27;
+inline constexpr uint32_t UART_GATEWAY_BAUD = 115200;
 
 // ESP-NOW Base field-mode configuration.
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;

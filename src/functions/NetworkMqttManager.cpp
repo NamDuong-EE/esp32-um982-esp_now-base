@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <PubSubClient.h>
 #include <cmath>
 #include <cstring>
 
@@ -12,9 +11,11 @@
 #include "hardware/BaseEspnow_sender.h"
 
 #if CONNECT_USING_WIFI
+#include <PubSubClient.h>
 #include <WiFi.h>
 static WiFiClient transportClient;
 #elif CONNECT_USING_4G
+#include <PubSubClient.h>
 #ifndef TINY_GSM_MODEM_SIM7600
 #define TINY_GSM_MODEM_SIM7600
 #endif
@@ -22,10 +23,16 @@ static WiFiClient transportClient;
 static HardwareSerial modemSerial(2);
 static TinyGsm modem(modemSerial);
 static TinyGsmClient transportClient(modem);
+#elif CONNECT_USING_UART_GATEWAY
+#include "functions/UartMqttClient.h"
 #endif
 
 namespace {
+#if CONNECT_USING_UART_GATEWAY
+UartMqttClient mqtt;
+#else
 PubSubClient mqtt(transportClient);
+#endif
 NetworkMqttStats stats{};
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t lastNetworkAttemptAtMs = 0;
@@ -79,6 +86,8 @@ struct NetworkMqttWorkBuffers {
 NetworkMqttWorkBuffers workBuffers{};
 #if CONNECT_USING_4G
 bool modemInitialized = false;
+bool modemUartStarted = false;
+bool modemPowerSequenceCompleted = false;
 #endif
 
 template <typename Member>
@@ -100,6 +109,9 @@ void setConnectionStats(bool internetConnected, bool mqttConnected, int32_t sign
 
 bool credentialsConfigured()
 {
+#if CONNECT_USING_UART_GATEWAY
+    return true;
+#else
     if (MQTT_HOST[0] == '\0') {
         return false;
     }
@@ -107,6 +119,7 @@ bool credentialsConfigured()
     return NETWORK_WIFI_SSID[0] != '\0';
 #else
     return MODEM_APN[0] != '\0';
+#endif
 #endif
 }
 
@@ -409,8 +422,10 @@ bool internetConnected()
 {
 #if CONNECT_USING_WIFI
     return WiFi.status() == WL_CONNECTED && WiFi.channel() == ESPNOW_WIFI_CHANNEL;
-#else
+#elif CONNECT_USING_4G
     return modemInitialized && modem.isNetworkConnected() && modem.isGprsConnected();
+#else
+    return mqtt.connected();
 #endif
 }
 
@@ -418,14 +433,61 @@ int32_t signalDbm()
 {
 #if CONNECT_USING_WIFI
     return WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
-#else
+#elif CONNECT_USING_4G
     if (!modemInitialized) {
         return 0;
     }
     const int16_t csq = modem.getSignalQuality();
     return (csq >= 0 && csq <= 31) ? (-113 + (2 * csq)) : 0;
+#else
+    return 0;
 #endif
 }
+
+#if CONNECT_USING_4G
+void startModemUart()
+{
+    if (modemUartStarted) {
+        return;
+    }
+    Serial.printf("[BASE][4G] Starting SIM7600 UART2 baud=%lu RX=%d TX=%d\n",
+                  static_cast<unsigned long>(MODEM_BAUD),
+                  MODEM_RX_PIN,
+                  MODEM_TX_PIN);
+    modemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+    modemUartStarted = true;
+}
+
+void runModemPowerOnSequence()
+{
+    if (modemPowerSequenceCompleted) {
+        return;
+    }
+    modemPowerSequenceCompleted = true;
+    if (!MODEM_POWER_CONTROL_ENABLED) {
+        Serial.println("[BASE][4G] Modem power control disabled");
+        return;
+    }
+
+    const uint8_t activeLevel =
+        MODEM_POWER_CONTROL_ACTIVE_HIGH ? HIGH : LOW;
+    const uint8_t inactiveLevel =
+        MODEM_POWER_CONTROL_ACTIVE_HIGH ? LOW : HIGH;
+    pinMode(MODEM_POWER_CONTROL_PIN, OUTPUT);
+    digitalWrite(MODEM_POWER_CONTROL_PIN, inactiveLevel);
+    delay(50);
+    Serial.printf("[BASE][4G] Power-on pulse pin=%d active=%s pulse_ms=%lu\n",
+                  MODEM_POWER_CONTROL_PIN,
+                  MODEM_POWER_CONTROL_ACTIVE_HIGH ? "HIGH" : "LOW",
+                  static_cast<unsigned long>(MODEM_POWER_PULSE_MS));
+    digitalWrite(MODEM_POWER_CONTROL_PIN, activeLevel);
+    delay(MODEM_POWER_PULSE_MS);
+    digitalWrite(MODEM_POWER_CONTROL_PIN, inactiveLevel);
+    Serial.printf("[BASE][4G] Waiting %lu ms for modem boot\n",
+                  static_cast<unsigned long>(MODEM_BOOT_WAIT_MS));
+    delay(MODEM_BOOT_WAIT_MS);
+}
+#endif
 
 void startNetworkConnection()
 {
@@ -440,16 +502,19 @@ void startNetworkConnection()
                ESPNOW_WIFI_CHANNEL,
                nullptr,
                true);
-#else
+#elif CONNECT_USING_4G
     if (!modemInitialized) {
-        Serial.printf("[BASE][4G] Starting SIM7600 UART2 baud=%lu RX=%d TX=%d\n",
-                      static_cast<unsigned long>(MODEM_BAUD),
-                      MODEM_RX_PIN,
-                      MODEM_TX_PIN);
-        modemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
-        modemInitialized = modem.restart();
+        startModemUart();
+        runModemPowerOnSequence();
+        // The modem was just powered on and allowed to boot. TinyGSM's
+        // SIM7600 restart() sends AT+CRESET, waits for a response and then
+        // blocks for another 24 seconds before init(). That reset is
+        // redundant here and can starve the ESP32 idle task long enough to
+        // trigger the task watchdog. Probe and configure the running modem
+        // directly instead.
+        modemInitialized = modem.init();
         if (!modemInitialized) {
-            Serial.println("[BASE][4G][WARN] Modem restart failed");
+            Serial.println("[BASE][4G][WARN] Modem init failed; check power, UART pins and baud");
             return;
         }
         Serial.println("[BASE][4G] Modem=" + modem.getModemInfo());
@@ -466,6 +531,9 @@ void startNetworkConnection()
         return;
     }
     Serial.println("[BASE][4G] Data connection ready");
+#else
+    mqtt.begin();
+    Serial.println("[BASE][UART-GW] Wired gateway transport ready");
 #endif
 }
 
@@ -475,12 +543,15 @@ String mqttClientId()
     String mac = WiFi.macAddress();
     mac.replace(":", "");
     return "base-" + mac;
-#else
+#elif CONNECT_USING_4G
     String imei = modem.getIMEI();
     if (imei.length() == 0) {
         imei = String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
     }
     return "base-" + imei;
+#else
+    return "base-uart-" +
+           String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
 #endif
 }
 
@@ -813,6 +884,9 @@ void setupNetworkMqtt()
     mqtt.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
     mqtt.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
     mqtt.setBufferSize(MQTT_BUFFER_SIZE);
+#if CONNECT_USING_UART_GATEWAY
+    mqtt.begin();
+#endif
 
     Serial.printf("[BASE][NETWORK] transport=%s configured=%s\n",
                   networkTransportName(),
@@ -857,8 +931,11 @@ void networkMqttLoop()
         } else {
             Serial.println("[BASE][WIFI][WARN] Connection lost; ESP-NOW remains active");
         }
-#else
+#elif CONNECT_USING_4G
         Serial.printf("[BASE][4G] Internet %s\n", online ? "connected" : "disconnected");
+#else
+        Serial.printf("[BASE][UART-GW] Link %s\n",
+                      online ? "ready" : "disconnected");
 #endif
         previousInternetConnected = online;
     }
@@ -914,7 +991,9 @@ const char* networkTransportName()
 {
 #if CONNECT_USING_WIFI
     return "wifi";
-#else
+#elif CONNECT_USING_4G
     return "4g";
+#else
+    return "uart-4g-gateway";
 #endif
 }

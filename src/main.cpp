@@ -614,7 +614,7 @@ void setup()
         createTask(taskRtcmSender, "RTCM Sender", 6144, 3, 1) &&
         createTask(healthLogTask, "Health Task", 4096, 1, 1) &&
         createTask(roverEcefLogTask, "Rover ECEF", 4096, 1, 1) &&
-        createTask(networkMqttTask, "Network MQTT", 10240, 1, 0);
+        createTask(networkMqttTask, "Network MQTT", 10240, 0, 0);
     if (!tasksReady) {
         delay(5000);
         ESP.restart();
