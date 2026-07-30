@@ -37,11 +37,19 @@
 #define BASE_MODEM_GPRS_PASSWORD ""
 #endif
 
-// UART2 from UM980/UM982 Base to ESP32.
+// UART from UM980/UM982 Base to ESP32. The normal Base board has the GNSS
+// wired to GPIO16/17. The legacy integrated 4G build overrides these pins
+// through PlatformIO because its SIM7600 already occupies GPIO16/17.
 inline constexpr int LED_PIN = 2;
 inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
-inline constexpr int RX_GNSS = 26; // UM980/UM982 TX2 -> ESP32 RX GPIO26
-inline constexpr int TX_GNSS = 27; // UM980/UM982 RX2 <- ESP32 TX GPIO27
+#ifndef BASE_GNSS_RX_PIN
+#define BASE_GNSS_RX_PIN 16
+#endif
+#ifndef BASE_GNSS_TX_PIN
+#define BASE_GNSS_TX_PIN 17
+#endif
+inline constexpr int RX_GNSS = BASE_GNSS_RX_PIN;
+inline constexpr int TX_GNSS = BASE_GNSS_TX_PIN;
 inline constexpr uint32_t GNSS_BAUD = 115200;
 inline constexpr size_t GNSS_RX_BUFFER_SIZE = 4096;
 
@@ -92,9 +100,10 @@ inline constexpr char MODEM_GPRS_USER[] = BASE_MODEM_GPRS_USER;
 inline constexpr char MODEM_GPRS_PASSWORD[] = BASE_MODEM_GPRS_PASSWORD;
 
 // Wired UART bridge between the Wi-Fi/GNSS Base and the dedicated 4G gateway.
-// Wi-Fi/GNSS board: RX16/TX17. 4G board: RX26/TX27.
-inline constexpr int UART_GATEWAY_CLIENT_RX_PIN = 16;
-inline constexpr int UART_GATEWAY_CLIENT_TX_PIN = 17;
+// Both boards expose GPIO26/27 for this link. Directions are crossed:
+// Base TX26 -> gateway RX26; Base RX27 <- gateway TX27.
+inline constexpr int UART_GATEWAY_CLIENT_RX_PIN = 27;
+inline constexpr int UART_GATEWAY_CLIENT_TX_PIN = 26;
 inline constexpr int UART_GATEWAY_MODEM_BOARD_RX_PIN = 26;
 inline constexpr int UART_GATEWAY_MODEM_BOARD_TX_PIN = 27;
 inline constexpr uint32_t UART_GATEWAY_BAUD = 115200;

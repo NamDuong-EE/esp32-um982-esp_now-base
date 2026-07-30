@@ -178,8 +178,8 @@ Các cấu hình dự kiến đặt trong `include/Prog_Config.h`:
 
 ```cpp
 inline constexpr char GNSS_UART_PORT_NAME[] = "UM980 UART2 TX2/RX2";
-inline constexpr int RX_GNSS = 26; // UM980/982 TX2 -> ESP32 RX GPIO26
-inline constexpr int TX_GNSS = 27; // UM980/982 RX2 <- ESP32 TX GPIO27
+inline constexpr int RX_GNSS = 16; // UM980/982 TX2 -> ESP32 RX GPIO16
+inline constexpr int TX_GNSS = 17; // UM980/982 RX2 <- ESP32 TX GPIO17
 inline constexpr uint32_t GNSS_BAUD = 115200;
 inline constexpr size_t GNSS_RX_BUFFER_SIZE = 4096;
 inline constexpr size_t RTCM_FRAME_QUEUE_LENGTH = 8;
@@ -221,8 +221,8 @@ inline constexpr char ESPNOW_NVS_ROVER_MAC_PREFIX[] = "rover";
 Base hiện chọn dùng cổng UART2 của UM980/UM982:
 
 ```text
-UM980/UM982 TX2  -> ESP32 GPIO26 / RX_GNSS
-UM980/UM982 RX2  <- ESP32 GPIO27 / TX_GNSS
+UM980/UM982 TX2  -> ESP32 GPIO16 / RX_GNSS
+UM980/UM982 RX2  <- ESP32 GPIO17 / TX_GNSS
 UM980/UM982 GND  -- ESP32 GND
 ```
 
@@ -578,9 +578,9 @@ Firmware Base ESP-NOW nên được nạp bằng PlatformIO vì repo dùng `plat
 - Cắm ESP32 Base vào máy tính.
 - Mở Device Manager trên Windows và xem cổng COM mới xuất hiện, ví dụ `COM5`.
 - Kiểm tra cấu hình trong `include/Prog_Config.h` trước khi nạp:
-  - `RX_GNSS = 26`;
-  - `TX_GNSS = 27`;
-  - dây nối `UM980 TX2 -> ESP32 GPIO26`, `UM980 RX2 -> ESP32 GPIO27`, `GND -> GND`;
+  - `RX_GNSS = 16`;
+  - `TX_GNSS = 17`;
+  - dây nối `UM980 TX2 -> ESP32 GPIO16`, `UM980 RX2 -> ESP32 GPIO17`, `GND -> GND`;
   - `ESPNOW_WIFI_CHANNEL = 6`;
   - không cần điền MAC Rover trong code; MAC Rover sẽ được lưu vào NVS sau khi pairing.
 
@@ -813,7 +813,7 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm `include/hardware/BaseEspnow_sender.h` và `src/hardware/BaseEspnow_sender.cpp` để khởi tạo ESP-NOW STA field mode, add peer Rover, chia RTCM frame thành fragment và gửi unicast có retry/counter.
 - Đã rút gọn `src/main.cpp`: bỏ luồng LoRa/NTRIP/MQTT khỏi field mode, chỉ còn UART GNSS, ESP-NOW Base, task đọc/gửi RTCM và health log qua Serial USB.
 - Đã dọn `platformio.ini` còn env chính `esp32u_base_espnow`, build đúng các module firmware Base ESP-NOW mới và `lib_ignore` các mock library cũ để không shadow `WiFi.h` của Arduino ESP32.
-- Đã cập nhật `include/Prog_Config.h` theo cấu hình ESP32U/ESP32 dev board ban đầu: dùng UM980 UART2 `TX2/RX2`, `RX_GNSS=16`, `TX_GNSS=17`, channel ESP-NOW `6`, Rover MAC `58:2A:BD:71:E4:F0`. Mapping TDM240x hiện tại đã chuyển GNSS sang GPIO26/27 để dành GPIO16/17 cho SIM7600.
+- Đã cập nhật `include/Prog_Config.h` theo cấu hình ESP32U/ESP32 dev board: dùng UM980 UART2 `TX2/RX2`, `RX_GNSS=16`, `TX_GNSS=17`, channel ESP-NOW `6`, Rover MAC `58:2A:BD:71:E4:F0`. Riêng environment 4G tích hợp cũ override GNSS sang GPIO26/27 vì SIM7600 chiếm GPIO16/17.
 - Đã build thành công lại sau khi điền MAC Rover bằng `C:\Python314\python.exe -m platformio run -e esp32u_base_espnow`. Kết quả PlatformIO: RAM dùng 44,600 bytes trên 327,680 bytes (13.6%), Flash dùng 736,077 bytes trên 1,310,720 bytes (56.2%).
 - Đã thêm mục "Cách nạp firmware vào ESP32 Base" với hướng dẫn build, upload, mở Serial Monitor và xử lý lỗi nạp thường gặp trên Windows.
 - Đã sửa lỗi ESP-NOW init `esp_wifi_set_channel failed: 12289` bằng cách đổi `WiFi.disconnect(true, true)` thành `WiFi.disconnect(false, true)` để không tắt Wi-Fi radio trước khi set channel. Build lại `esp32u_base_espnow` thành công.
@@ -826,8 +826,8 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 Branch `codex/4g-uart-gateway` có hai firmware riêng:
 
 - `esp32u_base_uart_4g_client`: nạp vào board Base Wi-Fi/GNSS. Board này vẫn
-  đọc UM980 trên GPIO26/27, chạy ESP-NOW và chuyển các bản tin MQTT sang UART
-  GPIO16/17.
+  đọc UM980 trên GPIO16/17, chạy ESP-NOW và chuyển các bản tin MQTT sang UART
+  GPIO26/27.
 - `esp32u_4g_uart_gateway`: nạp vào board có ESP32 + SIM7600, không cần UM980
   và không chạy ESP-NOW. Board này nhận frame UART trên GPIO26/27, kiểm tra
   CRC32, đưa vào queue RAM rồi publish qua 4G.
@@ -835,8 +835,8 @@ Branch `codex/4g-uart-gateway` có hai firmware riêng:
 Đấu dây UART chéo và nối chung mass:
 
 ```text
-Base Wi-Fi GPIO17 TX  ->  4G Gateway GPIO26 RX
-Base Wi-Fi GPIO16 RX  <-  4G Gateway GPIO27 TX
+Base Wi-Fi GPIO26 TX  ->  4G Gateway GPIO26 RX
+Base Wi-Fi GPIO27 RX  <-  4G Gateway GPIO27 TX
 Base Wi-Fi GND        ---  4G Gateway GND
 ```
 
