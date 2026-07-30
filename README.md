@@ -827,7 +827,7 @@ Branch `codex/4g-uart-gateway` có hai firmware riêng:
 
 - `esp32u_base_uart_4g_client`: nạp vào board Base Wi-Fi/GNSS. Board này vẫn
   đọc UM980 trên GPIO16/17, chạy ESP-NOW và chuyển các bản tin MQTT sang UART
-  GPIO26/27.
+  GPIO18/19.
 - `esp32u_4g_uart_gateway`: nạp vào board có ESP32 + SIM7600, không cần UM980
   và không chạy ESP-NOW. Board này nhận frame UART trên GPIO26/27, kiểm tra
   CRC32, đưa vào queue RAM rồi publish qua 4G.
@@ -835,8 +835,8 @@ Branch `codex/4g-uart-gateway` có hai firmware riêng:
 Đấu dây UART chéo và nối chung mass:
 
 ```text
-Base Wi-Fi GPIO26 TX  ->  4G Gateway GPIO26 RX
-Base Wi-Fi GPIO27 RX  <-  4G Gateway GPIO27 TX
+Base Wi-Fi GPIO18 TX  ->  4G Gateway GPIO26 RX
+Base Wi-Fi GPIO19 RX  <-  4G Gateway GPIO27 TX
 Base Wi-Fi GND        ---  4G Gateway GND
 ```
 

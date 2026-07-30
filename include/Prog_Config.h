@@ -100,10 +100,10 @@ inline constexpr char MODEM_GPRS_USER[] = BASE_MODEM_GPRS_USER;
 inline constexpr char MODEM_GPRS_PASSWORD[] = BASE_MODEM_GPRS_PASSWORD;
 
 // Wired UART bridge between the Wi-Fi/GNSS Base and the dedicated 4G gateway.
-// Both boards expose GPIO26/27 for this link. Directions are crossed:
-// Base TX26 -> gateway RX26; Base RX27 <- gateway TX27.
-inline constexpr int UART_GATEWAY_CLIENT_RX_PIN = 27;
-inline constexpr int UART_GATEWAY_CLIENT_TX_PIN = 26;
+// Base uses its available GPIO18/19; the gateway uses GPIO26/27.
+// Base TX18 -> gateway RX26; Base RX19 <- gateway TX27.
+inline constexpr int UART_GATEWAY_CLIENT_RX_PIN = 19;
+inline constexpr int UART_GATEWAY_CLIENT_TX_PIN = 18;
 inline constexpr int UART_GATEWAY_MODEM_BOARD_RX_PIN = 26;
 inline constexpr int UART_GATEWAY_MODEM_BOARD_TX_PIN = 27;
 inline constexpr uint32_t UART_GATEWAY_BAUD = 115200;
