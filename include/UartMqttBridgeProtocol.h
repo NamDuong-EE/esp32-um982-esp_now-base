@@ -12,6 +12,7 @@ inline constexpr size_t UART_MQTT_MAX_PAYLOAD_LENGTH = 768;
 enum UartMqttFrameType : uint8_t {
     UART_MQTT_FRAME_PUBLISH = 1,
     UART_MQTT_FRAME_ACK = 2,
+    UART_MQTT_FRAME_MESSAGE = 3,
 };
 
 enum UartMqttAckCode : uint8_t {

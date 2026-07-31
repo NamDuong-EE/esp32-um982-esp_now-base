@@ -24,6 +24,27 @@ inline constexpr size_t QUEUE_LENGTH = 8;
 QueuedPublish publishQueue[QUEUE_LENGTH]{};
 size_t queueHead = 0;
 size_t queueCount = 0;
+inline constexpr size_t RESULT_QUEUE_LENGTH = 4;
+QueuedPublish resultQueue[RESULT_QUEUE_LENGTH]{};
+size_t resultQueueHead = 0;
+size_t resultQueueCount = 0;
+
+struct PendingCommand {
+    char topic[UART_MQTT_MAX_TOPIC_LENGTH + 1] = {};
+    uint8_t payload[UART_MQTT_MAX_PAYLOAD_LENGTH + 1] = {};
+    uint32_t sequence = 0;
+    uint32_t lastSentAtMs = 0;
+    uint16_t payloadLength = 0;
+    uint8_t attempts = 0;
+};
+
+inline constexpr size_t COMMAND_QUEUE_LENGTH = 4;
+inline constexpr uint8_t COMMAND_MAX_ATTEMPTS = 3;
+inline constexpr uint32_t COMMAND_RETRY_INTERVAL_MS = 1000;
+PendingCommand commandQueue[COMMAND_QUEUE_LENGTH]{};
+size_t commandHead = 0;
+size_t commandCount = 0;
+uint32_t nextCommandSequence = 1;
 
 uint8_t receiveBuffer[sizeof(UartMqttFrameHeader) +
                       UART_MQTT_MAX_TOPIC_LENGTH +
@@ -35,6 +56,16 @@ bool modemInitialized = false;
 bool modemPowerSequenced = false;
 uint32_t lastNetworkAttemptAtMs = 0;
 uint32_t lastMqttAttemptAtMs = 0;
+
+void removeHeadCommand()
+{
+    if (commandCount == 0) {
+        return;
+    }
+    commandQueue[commandHead] = {};
+    commandHead = (commandHead + 1) % COMMAND_QUEUE_LENGTH;
+    --commandCount;
+}
 
 void sendAck(uint32_t sequence, UartMqttAckCode code)
 {
@@ -49,6 +80,53 @@ void sendAck(uint32_t sequence, UartMqttAckCode code)
                        sizeof(header));
 }
 
+void processCommandAck(const UartMqttFrameHeader& header)
+{
+    if (commandCount == 0 ||
+        commandQueue[commandHead].sequence != header.sequence) {
+        Serial.printf("[4G-GW][UART][WARN] Unexpected command ACK seq=%lu status=%u\n",
+                      static_cast<unsigned long>(header.sequence),
+                      static_cast<unsigned>(header.flags));
+        return;
+    }
+    if (header.flags == UART_MQTT_ACK_QUEUED) {
+        Serial.printf("[4G-GW][UART] Command delivered seq=%lu attempts=%u\n",
+                      static_cast<unsigned long>(header.sequence),
+                      static_cast<unsigned>(
+                          commandQueue[commandHead].attempts));
+        removeHeadCommand();
+    } else {
+        Serial.printf("[4G-GW][UART][WARN] Command NACK seq=%lu status=%u\n",
+                      static_cast<unsigned long>(header.sequence),
+                      static_cast<unsigned>(header.flags));
+    }
+}
+
+bool enqueuePublish(QueuedPublish* queue,
+                    size_t capacity,
+                    size_t& head,
+                    size_t& count,
+                    const QueuedPublish& incoming,
+                    bool replaceSameTopic)
+{
+    if (replaceSameTopic) {
+        for (size_t offset = 0; offset < count; ++offset) {
+            const size_t index = (head + offset) % capacity;
+            if (std::strcmp(queue[index].topic, incoming.topic) == 0) {
+                queue[index] = incoming;
+                return true;
+            }
+        }
+    }
+    if (count >= capacity) {
+        return false;
+    }
+    const size_t tail = (head + count) % capacity;
+    queue[tail] = incoming;
+    ++count;
+    return true;
+}
+
 void processFrame()
 {
     const auto* header =
@@ -57,41 +135,68 @@ void processFrame()
         static_cast<size_t>(header->topicLength) + header->payloadLength;
     const uint8_t* body = receiveBuffer + sizeof(UartMqttFrameHeader);
 
-    if (header->type != UART_MQTT_FRAME_PUBLISH ||
-        header->topicLength == 0 ||
-        header->topicLength > UART_MQTT_MAX_TOPIC_LENGTH ||
-        header->payloadLength > UART_MQTT_MAX_PAYLOAD_LENGTH ||
-        uartMqttFrameCrc(*header, body, bodyLength) != header->crc32) {
-        sendAck(header->sequence, UART_MQTT_ACK_INVALID);
+    if (uartMqttFrameCrc(*header, body, bodyLength) != header->crc32) {
+        if (header->type == UART_MQTT_FRAME_PUBLISH) {
+            sendAck(header->sequence, UART_MQTT_ACK_INVALID);
+        }
         Serial.printf("[4G-GW][UART][WARN] Invalid frame seq=%lu\n",
                       static_cast<unsigned long>(header->sequence));
         return;
     }
-    if (queueCount >= QUEUE_LENGTH) {
+    if (header->type == UART_MQTT_FRAME_ACK &&
+        header->topicLength == 0 &&
+        header->payloadLength == 0) {
+        processCommandAck(*header);
+        return;
+    }
+    if (header->type != UART_MQTT_FRAME_PUBLISH ||
+        header->topicLength == 0) {
+        Serial.printf("[4G-GW][UART][WARN] Unsupported frame type=%u seq=%lu\n",
+                      static_cast<unsigned>(header->type),
+                      static_cast<unsigned long>(header->sequence));
+        return;
+    }
+    QueuedPublish incoming{};
+    std::memcpy(incoming.topic, body, header->topicLength);
+    incoming.topic[header->topicLength] = '\0';
+    std::memcpy(incoming.payload,
+                body + header->topicLength,
+                header->payloadLength);
+    incoming.payload[header->payloadLength] = '\0';
+    incoming.sequence = header->sequence;
+    incoming.retained = (header->flags & UART_MQTT_FLAG_RETAIN) != 0;
+
+    const bool commandResult =
+        std::strcmp(incoming.topic, MQTT_TOPIC_COMMAND_RESULT) == 0;
+    const bool queued = commandResult
+        ? enqueuePublish(resultQueue,
+                         RESULT_QUEUE_LENGTH,
+                         resultQueueHead,
+                         resultQueueCount,
+                         incoming,
+                         false)
+        : enqueuePublish(publishQueue,
+                         QUEUE_LENGTH,
+                         queueHead,
+                         queueCount,
+                         incoming,
+                         true);
+    if (!queued) {
         sendAck(header->sequence, UART_MQTT_ACK_QUEUE_FULL);
-        Serial.printf("[4G-GW][UART][WARN] Queue full seq=%lu\n",
+        Serial.printf("[4G-GW][UART][WARN] %s queue full seq=%lu\n",
+                      commandResult ? "result" : "telemetry",
                       static_cast<unsigned long>(header->sequence));
         return;
     }
 
-    const size_t tail = (queueHead + queueCount) % QUEUE_LENGTH;
-    QueuedPublish& item = publishQueue[tail];
-    std::memcpy(item.topic, body, header->topicLength);
-    item.topic[header->topicLength] = '\0';
-    std::memcpy(item.payload,
-                body + header->topicLength,
-                header->payloadLength);
-    item.payload[header->payloadLength] = '\0';
-    item.sequence = header->sequence;
-    item.retained = (header->flags & UART_MQTT_FLAG_RETAIN) != 0;
-    ++queueCount;
-
-    sendAck(item.sequence, UART_MQTT_ACK_QUEUED);
-    Serial.printf("[4G-GW][UART] Queued seq=%lu topic=%s bytes=%u depth=%u\n",
-                  static_cast<unsigned long>(item.sequence),
-                  item.topic,
+    sendAck(incoming.sequence, UART_MQTT_ACK_QUEUED);
+    Serial.printf("[4G-GW][UART] Queued seq=%lu topic=%s bytes=%u depth=%u class=%s\n",
+                  static_cast<unsigned long>(incoming.sequence),
+                  incoming.topic,
                   static_cast<unsigned>(header->payloadLength),
-                  static_cast<unsigned>(queueCount));
+                  static_cast<unsigned>(
+                      commandResult ? resultQueueCount : queueCount),
+                  commandResult ? "result" : "telemetry");
 }
 
 void readBridge()
@@ -134,6 +239,98 @@ void readBridge()
             expectedLength = 0;
         }
     }
+}
+
+void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
+{
+    if (topic == nullptr ||
+        std::strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+        return;
+    }
+    const size_t topicLength = std::strlen(topic);
+    if (topicLength == 0 ||
+        topicLength > UART_MQTT_MAX_TOPIC_LENGTH ||
+        length > UART_MQTT_MAX_PAYLOAD_LENGTH) {
+        Serial.printf("[4G-GW][MQTT][CMD][WARN] Invalid size topic=%u payload=%u\n",
+                      static_cast<unsigned>(topicLength),
+                      length);
+        return;
+    }
+    if (commandCount >= COMMAND_QUEUE_LENGTH) {
+        Serial.printf("[4G-GW][MQTT][CMD][WARN] Command queue full bytes=%u\n",
+                      length);
+        return;
+    }
+
+    const size_t tail =
+        (commandHead + commandCount) % COMMAND_QUEUE_LENGTH;
+    PendingCommand& command = commandQueue[tail];
+    std::memcpy(command.topic, topic, topicLength);
+    command.topic[topicLength] = '\0';
+    std::memcpy(command.payload, payload, length);
+    command.payload[length] = '\0';
+    command.payloadLength = static_cast<uint16_t>(length);
+    command.sequence = nextCommandSequence++;
+    if (nextCommandSequence == 0) {
+        nextCommandSequence = 1;
+    }
+    ++commandCount;
+    Serial.printf("[4G-GW][MQTT][CMD] Queued seq=%lu bytes=%u depth=%u\n",
+                  static_cast<unsigned long>(command.sequence),
+                  length,
+                  static_cast<unsigned>(commandCount));
+}
+
+void sendPendingCommand(uint32_t now)
+{
+    if (commandCount == 0) {
+        return;
+    }
+    PendingCommand& command = commandQueue[commandHead];
+    if (command.attempts != 0 &&
+        now - command.lastSentAtMs < COMMAND_RETRY_INTERVAL_MS) {
+        return;
+    }
+    if (command.attempts >= COMMAND_MAX_ATTEMPTS) {
+        Serial.printf("[4G-GW][UART][CMD][WARN] Delivery failed seq=%lu attempts=%u\n",
+                      static_cast<unsigned long>(command.sequence),
+                      static_cast<unsigned>(command.attempts));
+        removeHeadCommand();
+        return;
+    }
+
+    const size_t topicLength = std::strlen(command.topic);
+    uint8_t body[UART_MQTT_MAX_TOPIC_LENGTH +
+                 UART_MQTT_MAX_PAYLOAD_LENGTH] = {};
+    std::memcpy(body, command.topic, topicLength);
+    std::memcpy(body + topicLength,
+                command.payload,
+                command.payloadLength);
+
+    UartMqttFrameHeader header{};
+    header.magic = UART_MQTT_MAGIC;
+    header.version = UART_MQTT_VERSION;
+    header.type = UART_MQTT_FRAME_MESSAGE;
+    header.sequence = command.sequence;
+    header.topicLength = static_cast<uint16_t>(topicLength);
+    header.payloadLength = command.payloadLength;
+    header.crc32 = uartMqttFrameCrc(
+        header, body, topicLength + command.payloadLength);
+
+    const size_t headerWritten = bridgeSerial.write(
+        reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+    const size_t bodyWritten = bridgeSerial.write(
+        body, topicLength + command.payloadLength);
+    ++command.attempts;
+    command.lastSentAtMs = now;
+    Serial.printf("[4G-GW][UART][CMD] TX seq=%lu attempt=%u bytes=%u result=%s\n",
+                  static_cast<unsigned long>(command.sequence),
+                  static_cast<unsigned>(command.attempts),
+                  static_cast<unsigned>(command.payloadLength),
+                  headerWritten == sizeof(header) &&
+                          bodyWritten == topicLength + command.payloadLength
+                      ? "ok"
+                      : "partial");
 }
 
 void powerOnModem()
@@ -208,34 +405,62 @@ void ensureMqtt()
                      "offline")) {
         const bool statusPublished =
             mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
+        const bool commandSubscribed =
+            mqtt.subscribe(MQTT_TOPIC_COMMAND, 1);
         Serial.printf("[4G-GW][MQTT] Connected broker=%s:%u\n",
                       MQTT_HOST,
                       MQTT_PORT);
         Serial.printf("[4G-GW][MQTT] Status topic=%s online=%s retained=yes\n",
                       MQTT_TOPIC_STATUS,
                       statusPublished ? "published" : "publish_failed");
+        Serial.printf("[4G-GW][MQTT] Command topic=%s subscribe=%s qos=1\n",
+                      MQTT_TOPIC_COMMAND,
+                      commandSubscribed ? "ok" : "failed");
     } else {
         Serial.printf("[4G-GW][MQTT][WARN] Connect failed state=%d\n",
                       mqtt.state());
     }
 }
 
-void publishQueued()
+bool publishQueueHead(QueuedPublish* queue,
+                      size_t capacity,
+                      size_t& head,
+                      size_t& count,
+                      const char* queueClass)
 {
-    if (!mqtt.connected() || queueCount == 0) {
-        return;
+    if (!mqtt.connected() || count == 0) {
+        return false;
     }
-    QueuedPublish& item = publishQueue[queueHead];
+    QueuedPublish& item = queue[head];
     if (!mqtt.publish(item.topic, item.payload, item.retained)) {
-        return;
+        return false;
     }
-    Serial.printf("[4G-GW][MQTT] Published seq=%lu topic=%s depth=%u\n",
+    Serial.printf("[4G-GW][MQTT] Published seq=%lu topic=%s depth=%u class=%s\n",
                   static_cast<unsigned long>(item.sequence),
                   item.topic,
-                  static_cast<unsigned>(queueCount - 1));
+                  static_cast<unsigned>(count - 1),
+                  queueClass);
     sendAck(item.sequence, UART_MQTT_ACK_PUBLISHED);
-    queueHead = (queueHead + 1) % QUEUE_LENGTH;
-    --queueCount;
+    head = (head + 1) % capacity;
+    --count;
+    return true;
+}
+
+void publishQueued()
+{
+    if (resultQueueCount != 0) {
+        publishQueueHead(resultQueue,
+                         RESULT_QUEUE_LENGTH,
+                         resultQueueHead,
+                         resultQueueCount,
+                         "result");
+        return;
+    }
+    publishQueueHead(publishQueue,
+                     QUEUE_LENGTH,
+                     queueHead,
+                     queueCount,
+                     "telemetry");
 }
 }
 
@@ -243,6 +468,9 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
+    do {
+        nextCommandSequence = esp_random();
+    } while (nextCommandSequence == 0);
     Serial.println("\n=========================================");
     Serial.println("       ESP32 4G UART MQTT GATEWAY");
     Serial.println("=========================================");
@@ -257,6 +485,7 @@ void setup()
                       MODEM_RX_PIN,
                       MODEM_TX_PIN);
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(mqttCallback);
     mqtt.setKeepAlive(MQTT_KEEPALIVE_SECONDS);
     mqtt.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SECONDS);
     mqtt.setBufferSize(MQTT_BUFFER_SIZE);
@@ -268,6 +497,8 @@ void setup()
                   MODEM_RX_PIN,
                   MODEM_TX_PIN,
                   static_cast<unsigned long>(MODEM_BAUD));
+    Serial.printf("[4G-GW][UART][CMD] Initial sequence=%lu\n",
+                  static_cast<unsigned long>(nextCommandSequence));
 }
 
 void loop()
@@ -290,5 +521,6 @@ void loop()
         mqtt.loop();
         publishQueued();
     }
+    sendPendingCommand(now);
     delay(10);
 }

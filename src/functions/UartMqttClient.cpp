@@ -114,22 +114,18 @@ void UartMqttClient::processIncoming()
                 reinterpret_cast<const UartMqttFrameHeader*>(receiveBuffer_);
             if (header->magic != UART_MQTT_MAGIC ||
                 header->version != UART_MQTT_VERSION ||
-                header->type != UART_MQTT_FRAME_ACK ||
-                header->topicLength != 0 ||
-                header->payloadLength != 0 ||
-                uartMqttFrameCrc(*header, nullptr, 0) != header->crc32) {
+                header->topicLength > UART_MQTT_MAX_TOPIC_LENGTH ||
+                header->payloadLength > UART_MQTT_MAX_PAYLOAD_LENGTH) {
                 receiveLength_ = 0;
                 expectedLength_ = 0;
                 continue;
             }
-            expectedLength_ = sizeof(UartMqttFrameHeader);
+            expectedLength_ = sizeof(UartMqttFrameHeader) +
+                              header->topicLength +
+                              header->payloadLength;
         }
         if (expectedLength_ != 0 && receiveLength_ == expectedLength_) {
-            const auto* header =
-                reinterpret_cast<const UartMqttFrameHeader*>(receiveBuffer_);
-            Serial.printf("[BASE][UART-GW] ACK seq=%lu status=%u\n",
-                          static_cast<unsigned long>(header->sequence),
-                          static_cast<unsigned>(header->flags));
+            processCompleteFrame();
             receiveLength_ = 0;
             expectedLength_ = 0;
         }
@@ -138,6 +134,99 @@ void UartMqttClient::processIncoming()
             expectedLength_ = 0;
         }
     }
+}
+
+void UartMqttClient::processCompleteFrame()
+{
+    const auto* header =
+        reinterpret_cast<const UartMqttFrameHeader*>(receiveBuffer_);
+    const size_t bodyLength =
+        static_cast<size_t>(header->topicLength) + header->payloadLength;
+    const uint8_t* body = receiveBuffer_ + sizeof(UartMqttFrameHeader);
+    if (uartMqttFrameCrc(*header, body, bodyLength) != header->crc32) {
+        Serial.printf("[BASE][UART-GW][WARN] RX CRC failed seq=%lu\n",
+                      static_cast<unsigned long>(header->sequence));
+        if (header->type == UART_MQTT_FRAME_MESSAGE) {
+            sendAck(header->sequence, UART_MQTT_ACK_INVALID);
+        }
+        return;
+    }
+
+    if (header->type == UART_MQTT_FRAME_ACK &&
+        header->topicLength == 0 &&
+        header->payloadLength == 0) {
+        Serial.printf("[BASE][UART-GW] ACK seq=%lu status=%u\n",
+                      static_cast<unsigned long>(header->sequence),
+                      static_cast<unsigned>(header->flags));
+        return;
+    }
+
+    if (header->type != UART_MQTT_FRAME_MESSAGE ||
+        header->topicLength == 0) {
+        return;
+    }
+
+    if (deliverySeen(header->sequence)) {
+        Serial.printf("[BASE][UART-GW] Duplicate command seq=%lu; ACK again\n",
+                      static_cast<unsigned long>(header->sequence));
+        sendAck(header->sequence, UART_MQTT_ACK_QUEUED);
+        return;
+    }
+
+    std::memcpy(incomingTopic_, body, header->topicLength);
+    incomingTopic_[header->topicLength] = '\0';
+    std::memcpy(incomingPayload_,
+                body + header->topicLength,
+                header->payloadLength);
+    incomingPayload_[header->payloadLength] = '\0';
+    if (callback_ == nullptr) {
+        sendAck(header->sequence, UART_MQTT_ACK_INVALID);
+        return;
+    }
+
+    Serial.printf("[BASE][UART-GW] RX command seq=%lu topic=%s bytes=%u\n",
+                  static_cast<unsigned long>(header->sequence),
+                  incomingTopic_,
+                  static_cast<unsigned>(header->payloadLength));
+    rememberDelivery(header->sequence);
+    callback_(incomingTopic_,
+              incomingPayload_,
+              static_cast<unsigned int>(header->payloadLength));
+    sendAck(header->sequence, UART_MQTT_ACK_QUEUED);
+}
+
+void UartMqttClient::sendAck(uint32_t sequence, uint8_t status)
+{
+    UartMqttFrameHeader header{};
+    header.magic = UART_MQTT_MAGIC;
+    header.version = UART_MQTT_VERSION;
+    header.type = UART_MQTT_FRAME_ACK;
+    header.flags = status;
+    header.sequence = sequence;
+    header.crc32 = uartMqttFrameCrc(header, nullptr, 0);
+    gatewaySerial.write(reinterpret_cast<const uint8_t*>(&header),
+                        sizeof(header));
+}
+
+bool UartMqttClient::deliverySeen(uint32_t sequence) const
+{
+    if (sequence == 0) {
+        return false;
+    }
+    for (const uint32_t recent : recentDeliveries_) {
+        if (recent == sequence) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void UartMqttClient::rememberDelivery(uint32_t sequence)
+{
+    recentDeliveries_[recentDeliveryIndex_] = sequence;
+    recentDeliveryIndex_ =
+        (recentDeliveryIndex_ + 1) %
+        (sizeof(recentDeliveries_) / sizeof(recentDeliveries_[0]));
 }
 
 bool UartMqttClient::loop()

@@ -845,6 +845,18 @@ SIM7600 trên board gateway tiếp tục dùng ESP32 GPIO16 RX và GPIO17 TX. Ha
 retain, sequence, độ dài topic/payload và CRC32. Gateway trả ACK khi gói được
 đưa vào queue và khi publish thành công.
 
+Gateway subscribe QoS 1 topic `aitogy/base/test/command`. Command được chuyển
+xuống Base bằng frame `UART_MQTT_FRAME_MESSAGE`; gateway chờ ACK và retry tối
+đa 3 lần, cách nhau 1 giây. Base nhớ 8 sequence gần nhất để retry không làm
+thực thi lệnh trùng, sau đó gọi MQTT callback hiện có để parse JSON và phát
+`GNSS_COMMAND_REQUEST` tới Rover qua ESP-NOW. Kết quả từ Rover đi ngược qua
+UART và được gateway ưu tiên publish vào
+`aitogy/base/test/command-result`.
+
+Telemetry ECEF vẫn là best effort. Khi có bản tin mới cùng topic, gateway thay
+payload cũ trong queue bằng payload mới để không tích lũy tọa độ cũ. Queue
+`command-result` được tách riêng khỏi queue telemetry.
+
 Build hai firmware:
 
 ```powershell
