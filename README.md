@@ -34,7 +34,7 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 
 ```text
 [BASE][ROVER_ECEF] mac=58:2A:BD:71:E4:F0 seq=12 gnss_ms=43200100 ecef_m=(-1623456.1234,5734567.2345,2145678.3456) fix_quality=4 via=direct
-[BASE][MQTT][ECEF] Published topic=aitogy/base/rovers/582ABD71E4F0/ecef seq=12 corrected=0 bytes=...
+[BASE][MQTT][ECEF] Published topic=aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef seq=12 corrected=0 bytes=...
 ```
 
 ### ESP-NOW field mode
@@ -416,18 +416,18 @@ MQTT test dùng các topic:
 
 | Topic | Hướng | Nội dung |
 |---|---|---|
-| `aitogy/base/test/status` | Base publish retained | `online`; LWT ghi `offline` |
-| `aitogy/base/rovers/<MAC>/ecef` | Base publish khi nhận ECEF mới | JSON gồm ECEF raw, delta, ECEF corrected, GNSS time, fix quality và metadata nguồn |
-| `aitogy/base/test/command` | Base subscribe | Nhận `switch_to_base_fixed_ecef` hoặc `switch_to_rover` |
-| `aitogy/base/test/command-result` | Base publish | Kết quả Rover đã ghi chuỗi lệnh xuống UM980 qua COM2 hoặc lỗi/timeout |
+| `aitogy/<BASE_MAC>/base/status` | Base publish retained | `online`; LWT ghi `offline` |
+| `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/ecef` | Base publish khi nhận ECEF mới | JSON gồm ECEF raw, delta, ECEF corrected, GNSS time, fix quality và metadata nguồn |
+| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Nhận `switch_to_base_fixed_ecef` hoặc `switch_to_rover` |
+| `aitogy/<BASE_MAC>/base/command-result` | Base publish | Kết quả Rover đã ghi chuỗi lệnh xuống UM980 qua COM2 hoặc lỗi/timeout |
 
-Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/ecef`:
+Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef`:
 
 ```json
 {"rover_mac":"58:2A:BD:71:E4:F0","sequence":12,"gnss_time_ms":43200100,"fix_quality":4,"ecef_raw_m":{"x":-1623456.1234,"y":5734567.2345,"z":2145678.3456},"correction_valid":true,"correction_ecef_m":{"dx":0.0123,"dy":-0.0045,"dz":0.0067},"ecef_corrected_m":{"x":-1623456.1111,"y":5734567.2300,"z":2145678.3523},"via_relay":false,"relay_mac":"","rtcm_source":"temp_base","temp_base_mac":"68:09:47:9E:8C:08","rtcm_source_epoch":7,"correction_stream_id":32100,"source_age_ms":20,"correction_age_ms":15}
 ```
 
-Server có thể subscribe wildcard `aitogy/base/rovers/+/ecef` để nhận ECEF của tất cả Rover đã pair. Payload không có latitude, longitude, MSL height hoặc ellipsoidal height. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và ECEF mới.
+Server có thể subscribe wildcard `aitogy/+/base/rovers/+/ecef` để nhận ECEF từ mọi Base, hoặc `aitogy/<BASE_MAC>/base/rovers/+/ecef` cho một Base. Payload không có latitude, longitude, MSL height hoặc ellipsoidal height. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và ECEF mới.
 
 ### Kiến trúc RTCM hub với Temporary Base
 
@@ -483,7 +483,7 @@ Khi nhận ECEF, Base chụp kèm nguồn RTCM active **ngay tại thời điể
 
 ### Điều khiển UM980 chuyển giữa Rover và temporary Base - V1
 
-Để chọn một Rover làm Temporary Base, publish JSON sau vào `aitogy/base/test/command`:
+Để chọn một Rover làm Temporary Base, publish JSON sau vào `aitogy/<BASE_MAC>/base/command`:
 
 ```json
 {"action":"switch_to_base_fixed_ecef","target_mac":"58:2A:BD:71:E4:F0","fix_timeout_s":120,"transaction_id":123}
@@ -528,7 +528,7 @@ Kết quả fixed ECEF có thêm tọa độ đã dùng:
 
 Rover ghi 4 bước: `unlogall`, `mode rover survey`, `gpgga com2 1`, `saveconfig`. Khi result thành công, Rover mở lại nhận RTCM/gửi ECEF và Base bật lại RTCM tới peer đó. Cú pháp `MODE ROVER` yêu cầu UM980 Build7923+ hoặc UM982 Build7650+ theo Commands Manual N4 của Unicore.
 
-Kết quả được publish lên `aitogy/base/test/command-result`:
+Kết quả được publish lên `aitogy/<BASE_MAC>/base/command-result`:
 
 ```json
 {"transaction_id":123,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_fixed_ecef","status":"uart_sequence_written","completed_step":14,"total_steps":14,"detail_code":0,"ecef_m":{"x":-1623456.1234,"y":5734567.2345,"z":2145678.3456},"result_age_ms":8}
@@ -558,8 +558,8 @@ Kết nối thành công sẽ có các log:
 [BASE][NETWORK] transport=wifi configured=yes
 [BASE][WIFI] Connecting SSID=... fixed_channel=6
 [BASE][WIFI] Connected IP=... channel=6 RSSI=... dBm
-[BASE][MQTT] Connected, rover_ecef_filter=aitogy/base/rovers/+/ecef
-[BASE][MQTT][ECEF] Published topic=aitogy/base/rovers/.../ecef seq=... corrected=... bytes=...
+[BASE][MQTT] Connected, rover_ecef_filter=aitogy/<BASE_MAC>/base/rovers/+/ecef
+[BASE][MQTT][ECEF] Published topic=aitogy/<BASE_MAC>/base/rovers/.../ecef seq=... corrected=... bytes=...
 [BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 ...
 ```
 
@@ -773,8 +773,8 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 [WIFI] ESP-NOW fixed channel: 6
 [BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
 [BASE][NETWORK] transport=wifi configured=yes
-[BASE][MQTT] Connected, rover_ecef_filter=aitogy/base/rovers/+/ecef
-[BASE][MQTT][ECEF] Published topic=aitogy/base/rovers/.../ecef seq=... corrected=... bytes=...
+[BASE][MQTT] Connected, rover_ecef_filter=aitogy/<BASE_MAC>/base/rovers/+/ecef
+[BASE][MQTT][ECEF] Published topic=aitogy/<BASE_MAC>/base/rovers/.../ecef seq=... corrected=... bytes=...
 [BASE][RTCM_SOURCE] state=TEMP_PREPARING temp=... mode=fixed_ecef
 [BASE][HANDOVER_RESET] state=START rovers=... branches=... timeout_ms=45000
 [BASE][HANDOVER_RESET] branch=... command_ack=1
@@ -849,12 +849,12 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm `include/Network_Secrets.example.h` và file local `include/Network_Secrets.h` bị Git bỏ qua để không đưa Wi-Fi/MQTT/APN credentials vào repository.
 - Đã build thành công environment Wi-Fi `esp32u_base_espnow` sau khi thêm MQTT LLH: RAM 46.736/327.680 byte (14,3%), Flash 777.833/1.310.720 byte (59,3%).
 - Đã build thành công environment 4G `esp32u_base_4g_mqtt` với TinyGSM/SIM7600 sau khi thêm MQTT LLH: RAM 45.664/327.680 byte (13,9%), Flash 767.525/1.310.720 byte (58,6%). Chưa kiểm thử kết nối thực vì mạch 4G chưa hoàn thiện.
-- Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/base/rovers/<MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
+- Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
 
 ### 2026-07-21
 
 - Đã triển khai remote command V1 để Base parse JSON MQTT, chọn Rover trực tiếp đã pair và gửi packet type `8` bằng ESP-NOW unicast với `network_id`, transaction ID, COM2 và auth tag. Cơ chế thời gian ban đầu đã được thay thế hoàn toàn bằng Fixed ECEF ngày 2026-07-23.
-- Đã thêm packet result type `9`, timeout 10 giây, retry request một lần, queue command/result và publish kết quả lên `aitogy/base/test/command-result`.
+- Đã thêm packet result type `9`, timeout 10 giây, retry request một lần, queue command/result và publish kết quả lên `aitogy/<BASE_MAC>/base/command-result`.
 - Khi Rover trả `uart_sequence_written`, Base giữ peer cho control nhưng tạm ngừng gửi RTCM tới peer đó; health log thêm `rtcm_rovers` và các counter `cmd_*`. Trạng thái này chỉ ở RAM trong V1.
 - Đã thêm dependency ArduinoJson để parse command theo schema và allowlist; không chuyển tiếp raw UART command từ MQTT.
 - Build xác nhận sau khi thêm hai chiều: `esp32u_base_espnow` SUCCESS, RAM 48.632/327.680 byte (14,8%), Flash 788.793/1.310.720 byte (60,2%); `esp32u_base_4g_mqtt` SUCCESS, RAM 47.560 byte (14,5%), Flash 778.469 byte (59,4%). Chưa test MQTT/UM980 trên phần cứng trong lượt này.
@@ -890,7 +890,7 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - [x] Thêm command ID `5` để `CONFIG RTK USER_DEFAULTS`; Base chỉ bật RTCM cho nhánh sau ACK resume. Khi handover thành công dùng stream temp, khi timeout resume các nhánh trước khi rollback local.
 - [x] Sửa timeout `TEMP_PREPARING`: chờ đúng 15000 ms từ lúc bắt đầu cấu hình temp; không còn fallback sau guard 3000 ms chỉ vì chưa nhận frame đầu tiên.
 - [x] Khi temp active, UM980 Base gốc chuyển sang Rover, nhận RTCM temp và tính `delta = base_reference_ecef - base_observed_ecef`; MQTT publish ECEF raw/corrected, chỉ áp dụng khi stream/time/fix đều hợp lệ.
-- [x] MQTT chuyển sang `aitogy/base/rovers/<MAC>/ecef`, không còn trường LLH. Buffer MQTT tăng lên 1024 byte.
+- [x] MQTT chuyển sang `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/ecef`, không còn trường LLH. Buffer MQTT tăng lên 1024 byte.
 - [x] Sửa panic Core 0 trong `_dtoa_r`: chuyển mảng 30 snapshot và buffer JSON ECEF khỏi stack task MQTT, format trực tiếp `int64_t` scale `10000` thay cho `%f`, tăng stack MQTT từ 6144 lên 10240 byte và thêm `stack_hwm_bytes` vào network health.
 - [x] Chuyển mảng snapshot của task log ECEF khỏi stack để tránh cùng lỗi khi nhiều Rover online.
 - [x] Thêm chốt loại trừ `tempBaseMac` trực tiếp trong vòng fan-out RTCM; Base không gửi correction downstream ngược lại Temporary Base ngay cả khi sender đang giữ snapshot peer cũ trong lúc chuyển vai trò.

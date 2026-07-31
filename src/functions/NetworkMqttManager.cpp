@@ -5,6 +5,7 @@
 #include <PubSubClient.h>
 #include <cmath>
 #include <cstring>
+#include <esp_wifi.h>
 
 #include "Prog_Config.h"
 #include "RtcmEspNowProtocol.h"
@@ -32,6 +33,11 @@ uint32_t lastNetworkAttemptAtMs = 0;
 uint32_t lastMqttAttemptAtMs = 0;
 bool previousInternetConnected = false;
 bool previousMqttConnected = false;
+char baseMacTopicId[13] = {};
+char mqttTopicStatus[48] = {};
+char mqttTopicCommand[48] = {};
+char mqttTopicCommandResult[56] = {};
+char mqttTopicRoverEcefPrefix[56] = {};
 bool hasPendingGnssCommandResult = false;
 BaseGnssCommandResultEvent pendingGnssCommandResult{};
 
@@ -87,6 +93,39 @@ void incrementStat(Member member)
     portENTER_CRITICAL(&statsMux);
     ++(stats.*member);
     portEXIT_CRITICAL(&statsMux);
+}
+
+bool initializeMqttTopics()
+{
+    uint8_t mac[6] = {};
+    if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) {
+        Serial.println("[BASE][MQTT][ERROR] Cannot read Base STA MAC for topics");
+        return false;
+    }
+    snprintf(baseMacTopicId,
+             sizeof(baseMacTopicId),
+             "%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(mqttTopicStatus, sizeof(mqttTopicStatus), "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE, baseMacTopicId, MQTT_TOPIC_STATUS_SUFFIX);
+    snprintf(mqttTopicCommand, sizeof(mqttTopicCommand), "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE, baseMacTopicId, MQTT_TOPIC_COMMAND_SUFFIX);
+    snprintf(mqttTopicCommandResult,
+             sizeof(mqttTopicCommandResult),
+             "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE,
+             baseMacTopicId,
+             MQTT_TOPIC_COMMAND_RESULT_SUFFIX);
+    snprintf(mqttTopicRoverEcefPrefix,
+             sizeof(mqttTopicRoverEcefPrefix),
+             "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE,
+             baseMacTopicId,
+             MQTT_TOPIC_ROVERS_SUFFIX);
+    Serial.printf("[BASE][MQTT] topic_root=%s/%s/base\n",
+                  MQTT_TOPIC_NAMESPACE,
+                  baseMacTopicId);
+    return true;
 }
 
 void setConnectionStats(bool internetConnected, bool mqttConnected, int32_t signalDbm)
@@ -274,7 +313,7 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
     }
     Serial.println();
 
-    if (std::strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+    if (std::strcmp(topic, mqttTopicCommand) != 0) {
         return;
     }
     incrementStat(&NetworkMqttStats::commandsReceived);
@@ -471,17 +510,7 @@ void startNetworkConnection()
 
 String mqttClientId()
 {
-#if CONNECT_USING_WIFI
-    String mac = WiFi.macAddress();
-    mac.replace(":", "");
-    return "base-" + mac;
-#else
-    String imei = modem.getIMEI();
-    if (imei.length() == 0) {
-        imei = String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
-    }
-    return "base-" + imei;
-#endif
+    return "base-" + String(baseMacTopicId);
 }
 
 void connectMqtt()
@@ -498,7 +527,7 @@ void connectMqtt()
     if (!mqtt.connect(clientId.c_str(),
                       user,
                       password,
-                      MQTT_TOPIC_STATUS,
+                      mqttTopicStatus,
                       0,
                       true,
                       "offline")) {
@@ -507,10 +536,10 @@ void connectMqtt()
     }
 
     incrementStat(&NetworkMqttStats::mqttConnects);
-    mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
-    mqtt.subscribe(MQTT_TOPIC_COMMAND);
+    mqtt.publish(mqttTopicStatus, "online", true);
+    mqtt.subscribe(mqttTopicCommand);
     Serial.printf("[BASE][MQTT] Connected, rover_ecef_filter=%s/+/ecef\n",
-                  MQTT_TOPIC_ROVER_ECEF_PREFIX);
+                  mqttTopicRoverEcefPrefix);
 }
 
 PublishedEcefState* publishedStateFor(const uint8_t* mac)
@@ -595,7 +624,7 @@ void publishLatestRoverEcef(uint32_t now)
         snprintf(workBuffers.topic,
                  sizeof(workBuffers.topic),
                  "%s/%02X%02X%02X%02X%02X%02X/ecef",
-                 MQTT_TOPIC_ROVER_ECEF_PREFIX,
+                 mqttTopicRoverEcefPrefix,
                  status.mac[0], status.mac[1], status.mac[2],
                  status.mac[3], status.mac[4], status.mac[5]);
 
@@ -787,7 +816,7 @@ void publishGnssCommandResult(uint32_t now)
              workBuffers.ecefJson,
              static_cast<unsigned long>(now - pendingGnssCommandResult.receivedAtMs));
 
-    if (!mqtt.publish(MQTT_TOPIC_COMMAND_RESULT,
+    if (!mqtt.publish(mqttTopicCommandResult,
                       workBuffers.commandPayload,
                       false)) {
         incrementStat(&NetworkMqttStats::commandResultPublishFailures);
@@ -803,7 +832,8 @@ void publishGnssCommandResult(uint32_t now)
 
 void setupNetworkMqtt()
 {
-    const bool configured = credentialsConfigured();
+    const bool topicsReady = initializeMqttTopics();
+    const bool configured = topicsReady && credentialsConfigured();
     portENTER_CRITICAL(&statsMux);
     stats.configured = configured;
     portEXIT_CRITICAL(&statsMux);
