@@ -56,6 +56,54 @@ bool modemInitialized = false;
 bool modemPowerSequenced = false;
 uint32_t lastNetworkAttemptAtMs = 0;
 uint32_t lastMqttAttemptAtMs = 0;
+bool baseIdentityReady = false;
+char attachedBaseMac[13] = {};
+char mqttTopicStatus[48] = {};
+char mqttTopicCommand[48] = {};
+char mqttTopicCommandResult[56] = {};
+
+bool isHexCharacter(char value)
+{
+    return (value >= '0' && value <= '9') ||
+           (value >= 'A' && value <= 'F') ||
+           (value >= 'a' && value <= 'f');
+}
+
+bool learnBaseIdentity(const char* topic)
+{
+    if (topic == nullptr) return false;
+    char prefix[16] = {};
+    snprintf(prefix, sizeof(prefix), "%s/", MQTT_TOPIC_NAMESPACE);
+    const size_t prefixLength = std::strlen(prefix);
+    if (std::strncmp(topic, prefix, prefixLength) != 0) return false;
+    const char* macText = topic + prefixLength;
+    for (size_t index = 0; index < 12; ++index) {
+        if (!isHexCharacter(macText[index])) return false;
+    }
+    if (std::strncmp(macText + 12, "/base/", 6) != 0) return false;
+
+    char discoveredMac[13] = {};
+    for (size_t index = 0; index < 12; ++index) {
+        const char value = macText[index];
+        discoveredMac[index] = value >= 'a' && value <= 'f'
+            ? value - ('a' - 'A') : value;
+    }
+    if (baseIdentityReady) {
+        return std::strcmp(attachedBaseMac, discoveredMac) == 0;
+    }
+    std::memcpy(attachedBaseMac, discoveredMac, sizeof(attachedBaseMac));
+    snprintf(mqttTopicStatus, sizeof(mqttTopicStatus), "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE, attachedBaseMac, MQTT_TOPIC_STATUS_SUFFIX);
+    snprintf(mqttTopicCommand, sizeof(mqttTopicCommand), "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE, attachedBaseMac, MQTT_TOPIC_COMMAND_SUFFIX);
+    snprintf(mqttTopicCommandResult, sizeof(mqttTopicCommandResult),
+             "%s/%s/base/%s", MQTT_TOPIC_NAMESPACE, attachedBaseMac,
+             MQTT_TOPIC_COMMAND_RESULT_SUFFIX);
+    baseIdentityReady = true;
+    Serial.printf("[4G-GW][UART] Attached Base MAC=%s topic_root=%s/%s/base\n",
+                  attachedBaseMac, MQTT_TOPIC_NAMESPACE, attachedBaseMac);
+    return true;
+}
 
 void removeHeadCommand()
 {
@@ -166,8 +214,15 @@ void processFrame()
     incoming.sequence = header->sequence;
     incoming.retained = (header->flags & UART_MQTT_FLAG_RETAIN) != 0;
 
+    if (!learnBaseIdentity(incoming.topic)) {
+        sendAck(header->sequence, UART_MQTT_ACK_INVALID);
+        Serial.printf("[4G-GW][UART][WARN] Topic outside attached Base namespace: %s\n",
+                      incoming.topic);
+        return;
+    }
+
     const bool commandResult =
-        std::strcmp(incoming.topic, MQTT_TOPIC_COMMAND_RESULT) == 0;
+        std::strcmp(incoming.topic, mqttTopicCommandResult) == 0;
     const bool queued = commandResult
         ? enqueuePublish(resultQueue,
                          RESULT_QUEUE_LENGTH,
@@ -243,8 +298,8 @@ void readBridge()
 
 void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 {
-    if (topic == nullptr ||
-        std::strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+    if (topic == nullptr || !baseIdentityReady ||
+        std::strcmp(topic, mqttTopicCommand) != 0) {
         return;
     }
     const size_t topicLength = std::strlen(topic);
@@ -383,7 +438,7 @@ bool ensureMobileNetwork()
 
 void ensureMqtt()
 {
-    if (mqtt.connected() || MQTT_HOST[0] == '\0') {
+    if (mqtt.connected() || MQTT_HOST[0] == '\0' || !baseIdentityReady) {
         return;
     }
     const uint32_t now = millis();
@@ -391,30 +446,29 @@ void ensureMqtt()
         return;
     }
     lastMqttAttemptAtMs = now;
-    String clientId = "4g-gateway-" +
-                      String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
+    String clientId = "4g-gateway-" + String(attachedBaseMac);
     const char* user = MQTT_USER[0] == '\0' ? nullptr : MQTT_USER;
     const char* password =
         MQTT_PASSWORD[0] == '\0' ? nullptr : MQTT_PASSWORD;
     if (mqtt.connect(clientId.c_str(),
                      user,
                      password,
-                     MQTT_TOPIC_STATUS,
+                      mqttTopicStatus,
                      0,
                      true,
                      "offline")) {
         const bool statusPublished =
-            mqtt.publish(MQTT_TOPIC_STATUS, "online", true);
+            mqtt.publish(mqttTopicStatus, "online", true);
         const bool commandSubscribed =
-            mqtt.subscribe(MQTT_TOPIC_COMMAND, 1);
+            mqtt.subscribe(mqttTopicCommand, 1);
         Serial.printf("[4G-GW][MQTT] Connected broker=%s:%u\n",
                       MQTT_HOST,
                       MQTT_PORT);
         Serial.printf("[4G-GW][MQTT] Status topic=%s online=%s retained=yes\n",
-                      MQTT_TOPIC_STATUS,
+                      mqttTopicStatus,
                       statusPublished ? "published" : "publish_failed");
         Serial.printf("[4G-GW][MQTT] Command topic=%s subscribe=%s qos=1\n",
-                      MQTT_TOPIC_COMMAND,
+                       mqttTopicCommand,
                       commandSubscribed ? "ok" : "failed");
     } else {
         Serial.printf("[4G-GW][MQTT][WARN] Connect failed state=%d\n",
@@ -499,6 +553,7 @@ void setup()
                   static_cast<unsigned long>(MODEM_BAUD));
     Serial.printf("[4G-GW][UART][CMD] Initial sequence=%lu\n",
                   static_cast<unsigned long>(nextCommandSequence));
+    Serial.println("[4G-GW][UART] Waiting for Base MAC namespace announcement");
 }
 
 void loop()
