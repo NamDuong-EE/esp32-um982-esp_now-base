@@ -36,7 +36,7 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 ```text
 [BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=12 lat=21.0734567 lon=105.8123456 height_m=12.345 age_ms=20
 [BASE][ROVER_LLH] mac=58:2A:BD:71:E4:F0 seq=13 lat=21.0734567 lon=105.8123456 height_m=12.345 via=relay relay_mac=68:09:47:9D:33:70 age_ms=20
-[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/582ABD71E4F0/llh seq=12 bytes=...
+[BASE][MQTT][LLH] Published topic=aitogy/680947F84890/base/rovers/582ABD71E4F0/llh seq=12 bytes=...
 ```
 
 ### ESP-NOW field mode
@@ -416,17 +416,17 @@ MQTT test dùng các topic:
 
 | Topic | Hướng | Nội dung |
 |---|---|---|
-| `aitogy/base/test/status` | Base publish retained | `online`; LWT ghi `offline` |
-| `aitogy/base/rovers/<MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height và source age |
-| `aitogy/base/test/command` | Base subscribe | Chỉ log payload để test downlink, không tự động gửi lệnh xuống UM980 |
+| `aitogy/<BASE_MAC>/base/status` | Base publish retained | `online`; LWT ghi `offline` |
+| `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/llh` | Base publish khi nhận LLH mới | JSON gồm MAC Rover, sequence, latitude, longitude, height và source age |
+| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Chỉ log payload để test downlink, không tự động gửi lệnh xuống UM980 |
 
-Ví dụ topic `aitogy/base/rovers/582ABD71E4F0/llh`:
+Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/llh`:
 
 ```json
 {"rover_mac":"58:2A:BD:71:E4:F0","sequence":12,"latitude":21.0734567,"longitude":105.8123456,"height_m":12.345,"source_age_ms":20}
 ```
 
-Server có thể subscribe wildcard `aitogy/base/rovers/+/llh` để nhận LLH của tất cả Rover đã pair. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và LLH mới.
+Server có thể subscribe wildcard `aitogy/+/base/rovers/+/llh` để nhận LLH từ mọi Base, hoặc `aitogy/<BASE_MAC>/base/rovers/+/llh` cho một Base. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và LLH mới.
 
 Bản hiện tại dùng MQTT TCP port `1883` để thử nghiệm trong mạng tin cậy, chưa bật TLS. Khi dùng server thực tế qua Internet cần bổ sung TLS/xác thực chứng chỉ trước khi triển khai.
 
@@ -446,8 +446,8 @@ Kết nối thành công sẽ có các log:
 [BASE][NETWORK] transport=wifi configured=yes
 [BASE][WIFI] Connecting SSID=... fixed_channel=6
 [BASE][WIFI] Connected IP=... channel=6 RSSI=... dBm
-[BASE][MQTT] Connected, rover_llh_filter=aitogy/base/rovers/+/llh
-[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/.../llh seq=... bytes=...
+[BASE][MQTT] Connected, rover_llh_filter=aitogy/<BASE_MAC>/base/rovers/+/llh
+[BASE][MQTT][LLH] Published topic=aitogy/<BASE_MAC>/base/rovers/.../llh seq=... bytes=...
 [BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 llh_published=... ...
 ```
 
@@ -656,8 +656,8 @@ Khuyến nghị: giai đoạn đầu dùng phương án A để kiểm thử ESP
 [WIFI] ESP-NOW fixed channel: 6
 [BASE][ESP-NOW] Ready, channel=6, LR=250 Kbps, streamId=N
 [BASE][NETWORK] transport=wifi configured=yes
-[BASE][MQTT] Connected, rover_llh_filter=aitogy/base/rovers/+/llh
-[BASE][MQTT][LLH] Published topic=aitogy/base/rovers/.../llh seq=... bytes=...
+[BASE][MQTT] Connected, rover_llh_filter=aitogy/<BASE_MAC>/base/rovers/+/llh
+[BASE][MQTT][LLH] Published topic=aitogy/<BASE_MAC>/base/rovers/.../llh seq=... bytes=...
 [BASE][SETUP] Khoi dong hoan tat
 [BASE][HEALTH] rtcm_valid=..., frames_acked=..., fragments_sent=..., ack_timeout=..., queue_drop=..., stale_drop=...
 [BASE][NETWORK_HEALTH] transport=wifi configured=1 internet=1 mqtt=1 signal_dbm=...
@@ -724,4 +724,4 @@ Repo này sẽ trở thành firmware Base ESP-NOW. Nhiệm vụ chính là thay 
 - Đã thêm `include/Network_Secrets.example.h` và file local `include/Network_Secrets.h` bị Git bỏ qua để không đưa Wi-Fi/MQTT/APN credentials vào repository.
 - Đã build thành công environment Wi-Fi `esp32u_base_espnow` sau khi thêm MQTT LLH: RAM 46.736/327.680 byte (14,3%), Flash 777.833/1.310.720 byte (59,3%).
 - Đã build thành công environment 4G `esp32u_base_4g_mqtt` với TinyGSM/SIM7600 sau khi thêm MQTT LLH: RAM 45.664/327.680 byte (13,9%), Flash 767.525/1.310.720 byte (58,6%). Chưa kiểm thử kết nối thực vì mạch 4G chưa hoàn thiện.
-- Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/base/rovers/<MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
+- Đã bỏ hoàn toàn heartbeat MQTT 30 giây. Base publish mỗi snapshot LLH mới của Rover lên `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/llh`; payload có MAC, sequence, latitude, longitude, height MSL và source age. Mỗi snapshot chỉ publish một lần; lỗi publish retry tối đa 1 lần/giây và khi reconnect chỉ gửi trạng thái mới nhất, không phát lại backlog.
