@@ -131,6 +131,7 @@ BaseRoverEcefStatus resetCohortSnapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
 size_t resetCohortCount = 0;
 size_t resetBranchCount = 0;
 uint32_t resetGateStartedAtMs = 0;
+bool resetWaitingForFreshTempLogged = false;
 DeferredTempAckState deferredTempAck{};
 
 constexpr uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -2187,6 +2188,7 @@ void beginResetCohort()
     resetCohortCount = 0;
     resetBranchCount = 0;
     resetGateStartedAtMs = now;
+    resetWaitingForFreshTempLogged = false;
     for (size_t index = 0; index < snapshotCount; ++index) {
         const BaseRoverEcefStatus& status = resetCohortSnapshots[index];
         if (!status.valid ||
@@ -2416,7 +2418,7 @@ void progressResetCohort(uint32_t now)
     }
 
     bool ready = true;
-    bool timedOut = false;
+    bool gateTimedOut = false;
     ResetCohortBranch branches[ESPNOW_MAX_PAIRED_ROVERS] = {};
     size_t branchCount = 0;
     portENTER_CRITICAL(&resetMux);
@@ -2442,16 +2444,36 @@ void progressResetCohort(uint32_t now)
                 resetCohort[index].nonRtkObservedAtMs >= branchAckedAtMs &&
                 branchAckedAtMs != 0;
     }
-    timedOut =
-        now - resetGateStartedAtMs > TEMP_RESET_GATE_TIMEOUT_MS ||
-        source.lastTempFrameAtMs == 0 ||
-        now - source.lastTempFrameAtMs > TEMP_RTCM_SOURCE_TIMEOUT_MS;
+    gateTimedOut =
+        now - resetGateStartedAtMs > TEMP_RESET_GATE_TIMEOUT_MS;
     portEXIT_CRITICAL(&resetMux);
 
-    if (!ready && !timedOut) {
+    const bool tempFrameFresh =
+        source.lastTempFrameAtMs != 0 &&
+        now - source.lastTempFrameAtMs <= TEMP_RTCM_SOURCE_TIMEOUT_MS;
+
+    // The reset ACK/fix gate and temp RTCM freshness can become ready on
+    // different loop iterations. Do not activate a source whose last frame
+    // is already stale: that would make the next baseEspNowLoop() iteration
+    // immediately fall back to the local Base. Keep the cohort reset and wait
+    // for a fresh temp frame, bounded by the overall reset-gate timeout.
+    if (!gateTimedOut && (!ready || !tempFrameFresh)) {
+        if (ready && !tempFrameFresh && !resetWaitingForFreshTempLogged) {
+            resetWaitingForFreshTempLogged = true;
+            const uint32_t tempAgeMs =
+                source.lastTempFrameAtMs == 0
+                    ? UINT32_MAX
+                    : now - source.lastTempFrameAtMs;
+            Serial.printf("[BASE][HANDOVER_RESET] state=WAIT_TEMP_FRESH "
+                          "temp_age_ms=%lu timeout_ms=%lu\n",
+                          static_cast<unsigned long>(tempAgeMs),
+                          static_cast<unsigned long>(
+                              TEMP_RESET_GATE_TIMEOUT_MS -
+                              (now - resetGateStartedAtMs)));
+        }
         return;
     }
-    if (ready) {
+    if (!gateTimedOut && ready && tempFrameFresh) {
         if (tempRtcmFrameQueue != nullptr) {
             xQueueReset(tempRtcmFrameQueue);
         }
@@ -2486,6 +2508,7 @@ void progressResetCohort(uint32_t now)
     resetCohortCount = 0;
     resetBranchCount = 0;
     resetGateStartedAtMs = 0;
+    resetWaitingForFreshTempLogged = false;
     portEXIT_CRITICAL(&resetMux);
 }
 
