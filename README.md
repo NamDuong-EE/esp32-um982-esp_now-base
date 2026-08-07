@@ -418,8 +418,8 @@ MQTT test dùng các topic:
 |---|---|---|
 | `aitogy/<BASE_MAC>/base/status` | Base publish retained | `online`; LWT ghi `offline` |
 | `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/ecef` | Base publish khi nhận ECEF mới | JSON gồm ECEF raw, delta, ECEF corrected, GNSS time, fix quality và metadata nguồn |
-| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Nhận `switch_to_base_fixed_ecef` hoặc `switch_to_rover` |
-| `aitogy/<BASE_MAC>/base/command-result` | Base publish | Kết quả Rover đã ghi chuỗi lệnh xuống UM980 qua COM2 hoặc lỗi/timeout |
+| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Nhận lệnh chọn Temporary Base hoặc đặt/xóa tọa độ của Base local |
+| `aitogy/<BASE_MAC>/base/command-result` | Base publish | Kết quả lệnh GNSS trên Rover hoặc đổi tọa độ Base local |
 
 Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef`:
 
@@ -428,6 +428,43 @@ Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef`:
 ```
 
 Server có thể subscribe wildcard `aitogy/+/base/rovers/+/ecef` để nhận ECEF từ mọi Base, hoặc `aitogy/<BASE_MAC>/base/rovers/+/ecef` cho một Base. Payload không có latitude, longitude, MSL height hoặc ellipsoidal height. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và ECEF mới.
+
+### Đặt tọa độ Base local qua MQTT
+
+Khi chưa có tọa độ được lưu trong NVS, firmware khởi động UM980/UM982 bằng
+`MODE BASE` không tham số để chạy survey-in mặc định 60 giây. Sau khi một tọa
+độ fixed được đặt thành công, ESP32 lưu ECEF trong NVS và cấu hình lại tọa độ đó
+ở các lần khởi động sau.
+
+Đặt trực tiếp ECEF, đơn vị mét:
+
+```json
+{"action":"set_local_base_coordinates","transaction_id":126,"coordinate_system":"ecef","ecef_m":{"x":-1623456.1234,"y":5734567.2345,"z":2145678.3456}}
+```
+
+Hoặc đặt LLH WGS84; `ellipsoid_height_m` bắt buộc là độ cao ellipsoid, không
+phải độ cao MSL:
+
+```json
+{"action":"set_local_base_coordinates","transaction_id":127,"coordinate_system":"llh","llh":{"latitude_deg":21.012345678,"longitude_deg":105.812345678,"ellipsoid_height_m":12.3456}}
+```
+
+Firmware đổi LLH sang ECEF, lượng tử ở `0,0001 m`, ghi chuỗi `MODE BASE X Y Z`
+và `SAVECONFIG`, rồi chỉ báo `applied_verified` sau khi hai frame RTCM 1006 mới
+khớp trong sai số `0,001 m`. Nếu hết 10 giây mà không xác minh được, firmware
+khôi phục cấu hình fixed trước đó hoặc survey-in và trả
+`verify_timeout_rolled_back`; lỗi khôi phục trả `rollback_failed`.
+
+Xóa tọa độ đã lưu và quay lại survey-in:
+
+```json
+{"action":"clear_local_base_coordinates","transaction_id":128}
+```
+
+Kết quả được publish không retained lên
+`aitogy/<BASE_MAC>/base/command-result`. Lệnh set/clear bắt buộc có
+`transaction_id` khác 0, phải được publish không retained, và bị từ chối trong
+toàn bộ quá trình Temporary Base hoặc khi một lệnh đổi tọa độ khác đang chạy.
 
 ### Kiến trúc RTCM hub với Temporary Base
 
@@ -922,7 +959,7 @@ pio run -e esp32u_4g_uart_gateway
 
 - Đã loại bỏ hoàn toàn action Base theo thời gian, trường duration trong wire packet và lệnh `MODE BASE TIME`. Temporary Base hiện chỉ được cấu hình bằng ECEF lấy từ LLH RTK Fixed của chính Rover đích.
 - Base yêu cầu `target_mac`, đợi snapshot trực tiếp có `fix_quality=4` và tuổi không quá 3000 ms, dùng ellipsoidal height để đổi WGS84 LLH sang ECEF rồi gửi command request type `8` dài 44 byte.
-- Allowlist runtime chỉ còn `switch_to_base_fixed_ecef` và `switch_to_rover`; payload/packet cũ bị từ chối. Cần nạp đồng bộ Base, Relay và toàn bộ Rover do wire protocol đã đổi.
+- Allowlist điều khiển Rover gồm `switch_to_base_fixed_ecef` và `switch_to_rover`; Base local nhận thêm `set_local_base_coordinates` và `clear_local_base_coordinates`. Payload/packet cũ bị từ chối. Cần nạp đồng bộ Base, Relay và toàn bộ Rover do wire protocol đã đổi.
 - Build xác nhận ECEF-only: `esp32u_base_espnow` SUCCESS, RAM 49.324/327.680 byte (15,1%), Flash 803.929/1.310.720 byte (61,3%); `esp32u_base_4g_mqtt` SUCCESS, RAM 48.260 byte (14,7%), Flash 793.481 byte (60,5%).
 
 ### 2026-07-24

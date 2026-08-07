@@ -2071,6 +2071,13 @@ BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot()
     return copy;
 }
 
+bool baseEspNowGnssCommandPending()
+{
+    return waitingForGnssCommandResult ||
+           (gnssCommandQueue != nullptr &&
+            uxQueueMessagesWaiting(gnssCommandQueue) != 0);
+}
+
 const char* baseRtcmSourceStateToString(BaseRtcmSourceState state)
 {
     switch (state) {

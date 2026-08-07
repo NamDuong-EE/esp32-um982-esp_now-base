@@ -50,6 +50,8 @@ uint32_t lastUartIdentityPublishAtMs = 0;
 #endif
 bool hasPendingGnssCommandResult = false;
 BaseGnssCommandResultEvent pendingGnssCommandResult{};
+bool hasPendingLocalCoordinateResult = false;
+BaseLocalCoordinateResult pendingLocalCoordinateResult{};
 
 struct PendingFixedBaseCommand {
     uint8_t targetMac[6] = {};
@@ -228,6 +230,66 @@ void formatEcefScaled(int64_t value, char* destination, size_t capacity)
              static_cast<unsigned long long>(magnitude % 10000ULL));
 }
 
+bool jsonFiniteNumber(JsonVariantConst value, double& destination)
+{
+    if (value.isNull() || !value.is<double>()) {
+        return false;
+    }
+    destination = value.as<double>();
+    return std::isfinite(destination);
+}
+
+bool parseLocalFixedCoordinates(JsonDocument& document,
+                                int64_t& xScaled,
+                                int64_t& yScaled,
+                                int64_t& zScaled)
+{
+    const char* coordinateSystem = document["coordinate_system"] | "";
+    if (std::strcmp(coordinateSystem, "ecef") == 0) {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+        const JsonObjectConst ecef = document["ecef_m"].as<JsonObjectConst>();
+        if (ecef.isNull() || !jsonFiniteNumber(ecef["x"], x) ||
+            !jsonFiniteNumber(ecef["y"], y) ||
+            !jsonFiniteNumber(ecef["z"], z)) {
+            return false;
+        }
+        constexpr double ecefLimitM =
+            static_cast<double>(RTCM_ESPNOW_ECEF_SCALED_LIMIT) /
+            RTCM_ESPNOW_ECEF_SCALE;
+        if (std::abs(x) > ecefLimitM || std::abs(y) > ecefLimitM ||
+            std::abs(z) > ecefLimitM) {
+            return false;
+        }
+        xScaled = static_cast<int64_t>(std::llround(
+            x * RTCM_ESPNOW_ECEF_SCALE));
+        yScaled = static_cast<int64_t>(std::llround(
+            y * RTCM_ESPNOW_ECEF_SCALE));
+        zScaled = static_cast<int64_t>(std::llround(
+            z * RTCM_ESPNOW_ECEF_SCALE));
+        return rtcmEspNowValidEcef(xScaled, yScaled, zScaled);
+    }
+    if (std::strcmp(coordinateSystem, "llh") == 0) {
+        double latitude = 0.0;
+        double longitude = 0.0;
+        double height = 0.0;
+        const JsonObjectConst llh = document["llh"].as<JsonObjectConst>();
+        return !llh.isNull() &&
+               jsonFiniteNumber(llh["latitude_deg"], latitude) &&
+               jsonFiniteNumber(llh["longitude_deg"], longitude) &&
+               jsonFiniteNumber(llh["ellipsoid_height_m"], height) &&
+               height >= -30000.0 && height <= 30000.0 &&
+               baseGnssGeodeticToEcef(latitude,
+                                      longitude,
+                                      height,
+                                      xScaled,
+                                      yScaled,
+                                      zScaled);
+    }
+    return false;
+}
+
 void processPendingFixedBaseCommand(uint32_t now)
 {
     if (!pendingFixedBaseCommand.active) {
@@ -339,18 +401,74 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
     const bool switchToBaseFixed =
         std::strcmp(action, "switch_to_base_fixed_ecef") == 0;
     const bool switchToRover = std::strcmp(action, "switch_to_rover") == 0;
-    if (!switchToBaseFixed && !switchToRover) {
+    const bool setLocalCoordinates =
+        std::strcmp(action, "set_local_base_coordinates") == 0;
+    const bool clearLocalCoordinates =
+        std::strcmp(action, "clear_local_base_coordinates") == 0;
+    if (!switchToBaseFixed && !switchToRover && !setLocalCoordinates &&
+        !clearLocalCoordinates) {
         incrementStat(&NetworkMqttStats::commandsRejected);
         Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] Unsupported action=%s\n", action);
         return;
     }
 
     uint32_t transactionId = document["transaction_id"] | 0U;
+    if ((setLocalCoordinates || clearLocalCoordinates) && transactionId == 0) {
+        incrementStat(&NetworkMqttStats::commandsRejected);
+        Serial.printf("[BASE][MQTT][LOCAL_COORD][REJECT] action=%s "
+                      "transaction_id required\n",
+                      action);
+        return;
+    }
     if (transactionId == 0) {
         do {
             transactionId = esp_random();
         } while (transactionId == 0);
     }
+
+    if (setLocalCoordinates || clearLocalCoordinates) {
+        if (pendingFixedBaseCommand.active ||
+            baseEspNowGnssCommandPending()) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][LOCAL_COORD][REJECT] txn=%lu "
+                          "result=temp_base_command_pending\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        int64_t xScaled = 0;
+        int64_t yScaled = 0;
+        int64_t zScaled = 0;
+        if (setLocalCoordinates &&
+            !parseLocalFixedCoordinates(document,
+                                        xScaled,
+                                        yScaled,
+                                        zScaled)) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][LOCAL_COORD][REJECT] txn=%lu "
+                          "result=invalid_coordinates\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
+        const BaseLocalCoordinateQueueResult queueResult =
+            setLocalCoordinates
+                ? baseGnssQueueSetFixedCoordinates(transactionId,
+                                                   xScaled,
+                                                   yScaled,
+                                                   zScaled)
+                : baseGnssQueueClearCoordinates(transactionId);
+        if (queueResult != BaseLocalCoordinateQueueResult::Queued) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][LOCAL_COORD][REJECT] txn=%lu result=%s\n",
+                          static_cast<unsigned long>(transactionId),
+                          baseLocalCoordinateQueueResultToString(queueResult));
+            return;
+        }
+        Serial.printf("[BASE][MQTT][LOCAL_COORD] Queued txn=%lu action=%s\n",
+                      static_cast<unsigned long>(transactionId),
+                      action);
+        return;
+    }
+
     const JsonVariantConst targetMacValue = document["target_mac"];
     const bool hasRequestedTarget = !targetMacValue.isNull();
     uint8_t requestedTargetMac[6] = {};
@@ -363,6 +481,13 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
         return;
     }
     if (switchToBaseFixed) {
+        if (baseGnssLocalCoordinateCommandBusy()) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
+                          "result=local_coordinate_command_busy\n",
+                          static_cast<unsigned long>(transactionId));
+            return;
+        }
         if (!hasRequestedTarget) {
             incrementStat(&NetworkMqttStats::commandsRejected);
             Serial.printf("[BASE][MQTT][GNSS_CMD][REJECT] txn=%lu "
@@ -824,6 +949,66 @@ const char* gnssCommandStatusText(const BaseGnssCommandResultEvent& result)
     }
 }
 
+void publishLocalCoordinateResult(uint32_t now)
+{
+    if (!hasPendingLocalCoordinateResult) {
+        hasPendingLocalCoordinateResult =
+            baseGnssPopLocalCoordinateResult(pendingLocalCoordinateResult);
+    }
+    if (!hasPendingLocalCoordinateResult) {
+        return;
+    }
+    snprintf(workBuffers.ecefJson, sizeof(workBuffers.ecefJson), "null");
+    if (pendingLocalCoordinateResult.command ==
+        BaseLocalCoordinateCommand::SetFixed) {
+        formatEcefScaled(pendingLocalCoordinateResult.ecefXScaled,
+                         workBuffers.rawX,
+                         sizeof(workBuffers.rawX));
+        formatEcefScaled(pendingLocalCoordinateResult.ecefYScaled,
+                         workBuffers.rawY,
+                         sizeof(workBuffers.rawY));
+        formatEcefScaled(pendingLocalCoordinateResult.ecefZScaled,
+                         workBuffers.rawZ,
+                         sizeof(workBuffers.rawZ));
+        snprintf(workBuffers.ecefJson,
+                 sizeof(workBuffers.ecefJson),
+                 "{\"x\":%s,\"y\":%s,\"z\":%s}",
+                 workBuffers.rawX,
+                 workBuffers.rawY,
+                 workBuffers.rawZ);
+    }
+    const char* action =
+        pendingLocalCoordinateResult.command ==
+                BaseLocalCoordinateCommand::SetFixed
+            ? "set_local_base_coordinates"
+            : "clear_local_base_coordinates";
+    snprintf(workBuffers.commandPayload,
+             sizeof(workBuffers.commandPayload),
+             "{\"transaction_id\":%lu,\"action\":\"%s\","
+             "\"status\":\"%s\",\"ecef_m\":%s,\"result_age_ms\":%lu}",
+             static_cast<unsigned long>(
+                 pendingLocalCoordinateResult.transactionId),
+             action,
+             baseLocalCoordinateStatusToString(
+                 pendingLocalCoordinateResult.status),
+             workBuffers.ecefJson,
+             static_cast<unsigned long>(
+                 now - pendingLocalCoordinateResult.completedAtMs));
+    if (!mqtt.publish(mqttTopicCommandResult,
+                      workBuffers.commandPayload,
+                      false)) {
+        incrementStat(&NetworkMqttStats::commandResultPublishFailures);
+        return;
+    }
+    incrementStat(&NetworkMqttStats::commandResultsPublished);
+    Serial.printf("[BASE][MQTT][LOCAL_COORD] Result published txn=%lu status=%s\n",
+                  static_cast<unsigned long>(
+                      pendingLocalCoordinateResult.transactionId),
+                  baseLocalCoordinateStatusToString(
+                      pendingLocalCoordinateResult.status));
+    hasPendingLocalCoordinateResult = false;
+}
+
 void publishGnssCommandResult(uint32_t now)
 {
     if (!hasPendingGnssCommandResult) {
@@ -1006,6 +1191,7 @@ void networkMqttLoop()
 
     mqtt.loop();
     if (mqtt.connected()) {
+        publishLocalCoordinateResult(now);
         publishGnssCommandResult(now);
         publishLatestRoverEcef(now);
     }

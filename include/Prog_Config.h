@@ -148,6 +148,15 @@ inline constexpr uint32_t BASE_ECEF_CORRECTION_MAX_TIME_DELTA_MS = 1500;
 inline constexpr uint32_t BASE_GNSS_ROLE_COMMAND_DELAY_MS = 1000;
 inline constexpr uint32_t BASE_GNSS_OUTPUT_COMMAND_DELAY_MS = 100;
 inline constexpr size_t GNSS_TX_BUFFER_SIZE = 2048;
+inline constexpr char BASE_GNSS_NVS_NAMESPACE[] = "base_gnss";
+inline constexpr char BASE_GNSS_NVS_COORDINATE_KEY[] = "fixed_ecef";
+inline constexpr uint32_t BASE_GNSS_SAVED_COORDINATE_MAGIC = 0x42474E53UL;
+inline constexpr uint32_t BASE_GNSS_FIXED_VERIFY_TIMEOUT_MS = 10000;
+inline constexpr int64_t BASE_GNSS_FIXED_VERIFY_TOLERANCE_SCALED = 10;
+inline constexpr uint8_t BASE_GNSS_FIXED_VERIFY_SAMPLES = 2;
+inline constexpr size_t BASE_GNSS_LOCAL_COMMAND_QUEUE_LENGTH = 1;
+inline constexpr size_t BASE_GNSS_LOCAL_RESULT_QUEUE_LENGTH = 4;
+inline constexpr uint32_t BASE_GNSS_LOCAL_COMMAND_TASK_STACK_BYTES = 6144;
 
 // ESP-NOW pairing. Hold the physical pairing button on Base and one Rover to
 // discover MAC addresses by broadcast, then switch back to unicast runtime.
