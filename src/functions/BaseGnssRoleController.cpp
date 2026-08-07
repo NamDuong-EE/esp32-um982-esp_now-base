@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <Preferences.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #include "Prog_Config.h"
@@ -23,6 +25,89 @@ SemaphoreHandle_t uartMutex = nullptr;
 LocalGnssRole role = LocalGnssRole::LocalBase;
 BaseEcefCorrectionSnapshot correction{};
 String nmeaLine;
+QueueHandle_t localCommandQueue = nullptr;
+QueueHandle_t localResultQueue = nullptr;
+volatile bool localCommandBusy = false;
+uint32_t referenceSequence = 0;
+
+struct SavedBaseCoordinate {
+    uint32_t magic = BASE_GNSS_SAVED_COORDINATE_MAGIC;
+    int64_t xScaled = 0;
+    int64_t yScaled = 0;
+    int64_t zScaled = 0;
+    uint32_t checksum = 0;
+};
+
+struct LocalCoordinateRequest {
+    uint32_t transactionId = 0;
+    BaseLocalCoordinateCommand command = BaseLocalCoordinateCommand::SetFixed;
+    int64_t xScaled = 0;
+    int64_t yScaled = 0;
+    int64_t zScaled = 0;
+};
+
+uint32_t coordinateChecksum(const SavedBaseCoordinate& coordinate)
+{
+    uint32_t hash = 2166136261UL;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&coordinate);
+    const size_t length = offsetof(SavedBaseCoordinate, checksum);
+    for (size_t index = 0; index < length; ++index) {
+        hash ^= bytes[index];
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
+bool loadSavedCoordinate(SavedBaseCoordinate& coordinate)
+{
+    Preferences preferences;
+    if (!preferences.begin(BASE_GNSS_NVS_NAMESPACE, true)) {
+        return false;
+    }
+    const bool present =
+        preferences.getBytesLength(BASE_GNSS_NVS_COORDINATE_KEY) ==
+            sizeof(coordinate) &&
+        preferences.getBytes(BASE_GNSS_NVS_COORDINATE_KEY,
+                             &coordinate,
+                             sizeof(coordinate)) == sizeof(coordinate);
+    preferences.end();
+    return present && coordinate.magic == BASE_GNSS_SAVED_COORDINATE_MAGIC &&
+           coordinate.checksum == coordinateChecksum(coordinate) &&
+           rtcmEspNowValidEcef(coordinate.xScaled,
+                               coordinate.yScaled,
+                               coordinate.zScaled);
+}
+
+bool saveCoordinate(int64_t xScaled, int64_t yScaled, int64_t zScaled)
+{
+    SavedBaseCoordinate coordinate{};
+    coordinate.xScaled = xScaled;
+    coordinate.yScaled = yScaled;
+    coordinate.zScaled = zScaled;
+    coordinate.checksum = coordinateChecksum(coordinate);
+    Preferences preferences;
+    if (!preferences.begin(BASE_GNSS_NVS_NAMESPACE, false)) {
+        return false;
+    }
+    const bool ok = preferences.putBytes(BASE_GNSS_NVS_COORDINATE_KEY,
+                                         &coordinate,
+                                         sizeof(coordinate)) ==
+                    sizeof(coordinate);
+    preferences.end();
+    return ok;
+}
+
+bool clearSavedCoordinate()
+{
+    Preferences preferences;
+    if (!preferences.begin(BASE_GNSS_NVS_NAMESPACE, false)) {
+        return false;
+    }
+    const bool ok = !preferences.isKey(BASE_GNSS_NVS_COORDINATE_KEY) ||
+                    preferences.remove(BASE_GNSS_NVS_COORDINATE_KEY);
+    preferences.end();
+    return ok;
+}
 
 uint64_t getUnsignedBits(const uint8_t* data, size_t bitOffset, size_t bitLength)
 {
@@ -177,6 +262,199 @@ bool writeCommand(const char* command)
     return written == length;
 }
 
+bool writeBaseConfiguration(bool fixed,
+                            int64_t xScaled,
+                            int64_t yScaled,
+                            int64_t zScaled,
+                            bool persist)
+{
+    char modeCommand[128] = {};
+    if (fixed) {
+        snprintf(modeCommand,
+                 sizeof(modeCommand),
+                 "mode base %.4f %.4f %.4f\r\n",
+                 static_cast<double>(xScaled) / RTCM_ESPNOW_ECEF_SCALE,
+                 static_cast<double>(yScaled) / RTCM_ESPNOW_ECEF_SCALE,
+                 static_cast<double>(zScaled) / RTCM_ESPNOW_ECEF_SCALE);
+    } else {
+        std::strcpy(modeCommand, "mode base\r\n");
+    }
+    const char* commands[] = {
+        "unlogall\r\n", modeCommand, "gpgga com2 1\r\n",
+        "rtcm1006 com2 1\r\n", "rtcm1033 com2 1\r\n",
+        "rtcm1074 com2 1\r\n", "rtcm1124 com2 1\r\n",
+        "rtcm1084 com2 1\r\n", "rtcm1094 com2 1\r\n",
+        "rtcm1042 com2 1\r\n", "rtcm1019 com2 1\r\n",
+        "rtcm1020 com2 1\r\n", "rtcm1045 com2 1\r\n",
+    };
+    bool ok = true;
+    for (const char* command : commands) {
+        ok = writeCommand(command) && ok;
+        vTaskDelay(pdMS_TO_TICKS(BASE_GNSS_OUTPUT_COMMAND_DELAY_MS));
+    }
+    if (persist) {
+        ok = writeCommand("saveconfig\r\n") && ok;
+        vTaskDelay(pdMS_TO_TICKS(BASE_GNSS_OUTPUT_COMMAND_DELAY_MS));
+    }
+    return ok;
+}
+
+bool waitForFixedReference(int64_t xScaled,
+                           int64_t yScaled,
+                           int64_t zScaled)
+{
+    uint32_t lastSequence = 0;
+    portENTER_CRITICAL(&stateMux);
+    lastSequence = referenceSequence;
+    portEXIT_CRITICAL(&stateMux);
+    uint8_t matchingSamples = 0;
+    const uint32_t startedAtMs = millis();
+    while (millis() - startedAtMs < BASE_GNSS_FIXED_VERIFY_TIMEOUT_MS) {
+        uint32_t sequence = 0;
+        int64_t referenceX = 0;
+        int64_t referenceY = 0;
+        int64_t referenceZ = 0;
+        portENTER_CRITICAL(&stateMux);
+        sequence = referenceSequence;
+        referenceX = correction.referenceXScaled;
+        referenceY = correction.referenceYScaled;
+        referenceZ = correction.referenceZScaled;
+        portEXIT_CRITICAL(&stateMux);
+        if (sequence != lastSequence) {
+            lastSequence = sequence;
+            const bool matches =
+                std::llabs(referenceX - xScaled) <=
+                    BASE_GNSS_FIXED_VERIFY_TOLERANCE_SCALED &&
+                std::llabs(referenceY - yScaled) <=
+                    BASE_GNSS_FIXED_VERIFY_TOLERANCE_SCALED &&
+                std::llabs(referenceZ - zScaled) <=
+                    BASE_GNSS_FIXED_VERIFY_TOLERANCE_SCALED;
+            matchingSamples = matches ? matchingSamples + 1U : 0U;
+            if (matchingSamples >= BASE_GNSS_FIXED_VERIFY_SAMPLES) {
+                return true;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return false;
+}
+
+void pushLocalResult(const LocalCoordinateRequest& request,
+                     BaseLocalCoordinateStatus status)
+{
+    if (localResultQueue == nullptr) {
+        return;
+    }
+    BaseLocalCoordinateResult result{};
+    result.transactionId = request.transactionId;
+    result.command = request.command;
+    result.status = status;
+    result.ecefXScaled = request.xScaled;
+    result.ecefYScaled = request.yScaled;
+    result.ecefZScaled = request.zScaled;
+    result.completedAtMs = millis();
+    if (xQueueSend(localResultQueue, &result, 0) != pdTRUE) {
+        BaseLocalCoordinateResult discarded{};
+        xQueueReceive(localResultQueue, &discarded, 0);
+        xQueueSend(localResultQueue, &result, 0);
+    }
+}
+
+[[noreturn]] void localCoordinateCommandTask(void*)
+{
+    LocalCoordinateRequest request{};
+    while (true) {
+        if (xQueueReceive(localCommandQueue, &request, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        localCommandBusy = true;
+        const BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
+        if (source.state != BaseRtcmSourceState::LocalActive) {
+            pushLocalResult(request, BaseLocalCoordinateStatus::UartError);
+            localCommandBusy = false;
+            continue;
+        }
+
+        SavedBaseCoordinate previous{};
+        const bool previousWasFixed = loadSavedCoordinate(previous);
+        if (request.command == BaseLocalCoordinateCommand::ClearToSurvey) {
+            const bool uartOk = writeBaseConfiguration(false, 0, 0, 0, true);
+            const bool storageOk = uartOk && clearSavedCoordinate();
+            if (storageOk) {
+                portENTER_CRITICAL(&stateMux);
+                correction.referenceValid = false;
+                correction.correctionValid = false;
+                correction.stableSamples = 0;
+                portEXIT_CRITICAL(&stateMux);
+                baseEspNowMarkLocalBaseReady();
+                pushLocalResult(request,
+                                BaseLocalCoordinateStatus::SurveyStarted);
+            } else {
+                pushLocalResult(request,
+                                uartOk ? BaseLocalCoordinateStatus::StorageError
+                                       : BaseLocalCoordinateStatus::UartError);
+            }
+            localCommandBusy = false;
+            continue;
+        }
+
+        if (!writeBaseConfiguration(true,
+                                    request.xScaled,
+                                    request.yScaled,
+                                    request.zScaled,
+                                    true)) {
+            pushLocalResult(request, BaseLocalCoordinateStatus::UartError);
+            localCommandBusy = false;
+            continue;
+        }
+        if (waitForFixedReference(request.xScaled,
+                                  request.yScaled,
+                                  request.zScaled)) {
+            if (saveCoordinate(request.xScaled,
+                               request.yScaled,
+                               request.zScaled)) {
+                baseEspNowMarkLocalBaseReady();
+                pushLocalResult(request,
+                                BaseLocalCoordinateStatus::AppliedVerified);
+            } else {
+                pushLocalResult(request,
+                                BaseLocalCoordinateStatus::StorageError);
+            }
+            localCommandBusy = false;
+            continue;
+        }
+
+        bool rollbackOk = false;
+        if (previousWasFixed) {
+            rollbackOk = writeBaseConfiguration(true,
+                                                previous.xScaled,
+                                                previous.yScaled,
+                                                previous.zScaled,
+                                                true) &&
+                         waitForFixedReference(previous.xScaled,
+                                               previous.yScaled,
+                                               previous.zScaled);
+        } else {
+            rollbackOk = writeBaseConfiguration(false, 0, 0, 0, true);
+            if (rollbackOk) {
+                portENTER_CRITICAL(&stateMux);
+                correction.referenceValid = false;
+                correction.correctionValid = false;
+                correction.stableSamples = 0;
+                portEXIT_CRITICAL(&stateMux);
+            }
+        }
+        if (rollbackOk) {
+            baseEspNowMarkLocalBaseReady();
+        }
+        pushLocalResult(request,
+                        rollbackOk
+                            ? BaseLocalCoordinateStatus::VerifyTimeoutRolledBack
+                            : BaseLocalCoordinateStatus::RollbackFailed);
+        localCommandBusy = false;
+    }
+}
+
 bool switchLocalGnssToRover()
 {
     portENTER_CRITICAL(&stateMux);
@@ -312,12 +590,60 @@ void updateCorrection(uint32_t gnssTimeMs,
 bool baseGnssRoleSetup()
 {
     uartMutex = xSemaphoreCreateMutex();
+    localCommandQueue = xQueueCreate(BASE_GNSS_LOCAL_COMMAND_QUEUE_LENGTH,
+                                     sizeof(LocalCoordinateRequest));
+    localResultQueue = xQueueCreate(BASE_GNSS_LOCAL_RESULT_QUEUE_LENGTH,
+                                    sizeof(BaseLocalCoordinateResult));
     nmeaLine.reserve(256);
-    return uartMutex != nullptr;
+    if (uartMutex == nullptr || localCommandQueue == nullptr ||
+        localResultQueue == nullptr) {
+        return false;
+    }
+
+    SavedBaseCoordinate saved{};
+    const bool hasSavedCoordinate = loadSavedCoordinate(saved);
+    const bool configured = hasSavedCoordinate
+                                ? writeBaseConfiguration(true,
+                                                         saved.xScaled,
+                                                         saved.yScaled,
+                                                         saved.zScaled,
+                                                         false)
+                                : writeBaseConfiguration(false, 0, 0, 0, false);
+    if (hasSavedCoordinate) {
+        portENTER_CRITICAL(&stateMux);
+        correction.referenceValid = true;
+        correction.referenceXScaled = saved.xScaled;
+        correction.referenceYScaled = saved.yScaled;
+        correction.referenceZScaled = saved.zScaled;
+        portEXIT_CRITICAL(&stateMux);
+        Serial.printf("[BASE][LOCAL_GNSS] Boot fixed ecef_m=(%.4f,%.4f,%.4f)\n",
+                      static_cast<double>(saved.xScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE,
+                      static_cast<double>(saved.yScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE,
+                      static_cast<double>(saved.zScaled) /
+                          RTCM_ESPNOW_ECEF_SCALE);
+    } else {
+        Serial.println("[BASE][LOCAL_GNSS] Boot survey-in (no saved coordinate)");
+    }
+    if (!configured) {
+        return false;
+    }
+    return xTaskCreate(localCoordinateCommandTask,
+                       "Local GNSS Cmd",
+                       BASE_GNSS_LOCAL_COMMAND_TASK_STACK_BYTES,
+                       nullptr,
+                       1,
+                       nullptr) == pdPASS;
 }
 
 void baseGnssRoleLoop()
 {
+    if (localCommandBusy ||
+        (localCommandQueue != nullptr &&
+         uxQueueMessagesWaiting(localCommandQueue) != 0)) {
+        return;
+    }
     const BaseRtcmSourceSnapshot source = getBaseRtcmSourceSnapshot();
     LocalGnssRole currentRole{};
     portENTER_CRITICAL(&stateMux);
@@ -394,6 +720,7 @@ void baseGnssRoleRecordLocalRtcm(const uint8_t* frame, size_t length)
     correction.referenceXScaled = xScaled;
     correction.referenceYScaled = yScaled;
     correction.referenceZScaled = zScaled;
+    ++referenceSequence;
     portEXIT_CRITICAL(&stateMux);
     if (changed) {
         Serial.printf("[BASE][REFERENCE] RTCM1006 ecef_m=(%.4f,%.4f,%.4f)\n",
@@ -437,4 +764,122 @@ BaseEcefCorrectionSnapshot getBaseEcefCorrectionSnapshot()
         snapshot.correctionValid = false;
     }
     return snapshot;
+}
+
+bool baseGnssGeodeticToEcef(double latitudeDegrees,
+                            double longitudeDegrees,
+                            double ellipsoidHeightM,
+                            int64_t& xScaled,
+                            int64_t& yScaled,
+                            int64_t& zScaled)
+{
+    if (latitudeDegrees < -90.0 || latitudeDegrees > 90.0 ||
+        longitudeDegrees < -180.0 || longitudeDegrees > 180.0) {
+        return false;
+    }
+    return geodeticToEcef(latitudeDegrees,
+                          longitudeDegrees,
+                          ellipsoidHeightM,
+                          xScaled,
+                          yScaled,
+                          zScaled);
+}
+
+BaseLocalCoordinateQueueResult baseGnssQueueSetFixedCoordinates(
+    uint32_t transactionId,
+    int64_t xScaled,
+    int64_t yScaled,
+    int64_t zScaled)
+{
+    if (transactionId == 0 ||
+        !rtcmEspNowValidEcef(xScaled, yScaled, zScaled)) {
+        return BaseLocalCoordinateQueueResult::InvalidCoordinates;
+    }
+    if (localCommandQueue == nullptr) {
+        return BaseLocalCoordinateQueueResult::NotReady;
+    }
+    if (getBaseRtcmSourceSnapshot().state !=
+        BaseRtcmSourceState::LocalActive) {
+        return BaseLocalCoordinateQueueResult::TempSourceActive;
+    }
+    LocalCoordinateRequest request{};
+    request.transactionId = transactionId;
+    request.command = BaseLocalCoordinateCommand::SetFixed;
+    request.xScaled = xScaled;
+    request.yScaled = yScaled;
+    request.zScaled = zScaled;
+    return xQueueSend(localCommandQueue, &request, 0) == pdTRUE
+               ? BaseLocalCoordinateQueueResult::Queued
+               : BaseLocalCoordinateQueueResult::Busy;
+}
+
+BaseLocalCoordinateQueueResult baseGnssQueueClearCoordinates(
+    uint32_t transactionId)
+{
+    if (transactionId == 0) {
+        return BaseLocalCoordinateQueueResult::InvalidCoordinates;
+    }
+    if (localCommandQueue == nullptr) {
+        return BaseLocalCoordinateQueueResult::NotReady;
+    }
+    if (getBaseRtcmSourceSnapshot().state !=
+        BaseRtcmSourceState::LocalActive) {
+        return BaseLocalCoordinateQueueResult::TempSourceActive;
+    }
+    LocalCoordinateRequest request{};
+    request.transactionId = transactionId;
+    request.command = BaseLocalCoordinateCommand::ClearToSurvey;
+    return xQueueSend(localCommandQueue, &request, 0) == pdTRUE
+               ? BaseLocalCoordinateQueueResult::Queued
+               : BaseLocalCoordinateQueueResult::Busy;
+}
+
+bool baseGnssPopLocalCoordinateResult(BaseLocalCoordinateResult& result)
+{
+    return localResultQueue != nullptr &&
+           xQueueReceive(localResultQueue, &result, 0) == pdTRUE;
+}
+
+bool baseGnssLocalCoordinateCommandBusy()
+{
+    return localCommandBusy ||
+           (localCommandQueue != nullptr &&
+            uxQueueMessagesWaiting(localCommandQueue) != 0);
+}
+
+const char* baseLocalCoordinateQueueResultToString(
+    BaseLocalCoordinateQueueResult result)
+{
+    switch (result) {
+    case BaseLocalCoordinateQueueResult::Queued:
+        return "queued";
+    case BaseLocalCoordinateQueueResult::Busy:
+        return "local_coordinate_command_busy";
+    case BaseLocalCoordinateQueueResult::TempSourceActive:
+        return "temporary_base_active";
+    case BaseLocalCoordinateQueueResult::InvalidCoordinates:
+        return "invalid_coordinates";
+    case BaseLocalCoordinateQueueResult::NotReady:
+        return "local_gnss_not_ready";
+    }
+    return "unknown";
+}
+
+const char* baseLocalCoordinateStatusToString(BaseLocalCoordinateStatus status)
+{
+    switch (status) {
+    case BaseLocalCoordinateStatus::AppliedVerified:
+        return "applied_verified";
+    case BaseLocalCoordinateStatus::SurveyStarted:
+        return "survey_started";
+    case BaseLocalCoordinateStatus::VerifyTimeoutRolledBack:
+        return "verify_timeout_rolled_back";
+    case BaseLocalCoordinateStatus::RollbackFailed:
+        return "rollback_failed";
+    case BaseLocalCoordinateStatus::UartError:
+        return "uart_error";
+    case BaseLocalCoordinateStatus::StorageError:
+        return "storage_error";
+    }
+    return "unknown";
 }

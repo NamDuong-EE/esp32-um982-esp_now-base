@@ -132,6 +132,7 @@ bool baseEspNowPopTempRtcmFrame(BaseTempRtcmFrame& frame, TickType_t waitTicks);
 void baseEspNowCompleteTempRtcmForward(const BaseTempRtcmFrame& frame,
                                        bool downstreamDelivered);
 BaseRtcmSourceSnapshot getBaseRtcmSourceSnapshot();
+bool baseEspNowGnssCommandPending();
 const char* baseRtcmSourceStateToString(BaseRtcmSourceState state);
 BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
