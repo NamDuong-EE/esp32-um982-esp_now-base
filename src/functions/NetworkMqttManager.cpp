@@ -116,21 +116,29 @@ bool initializeMqttTopics()
         Serial.println("[BASE][MQTT][ERROR] Cannot read Base STA MAC for topics");
         return false;
     }
-    snprintf(baseMacTopicId, sizeof(baseMacTopicId),
+    snprintf(baseMacTopicId,
+             sizeof(baseMacTopicId),
              "%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     snprintf(mqttTopicStatus, sizeof(mqttTopicStatus), "%s/%s/base/%s",
              MQTT_TOPIC_NAMESPACE, baseMacTopicId, MQTT_TOPIC_STATUS_SUFFIX);
     snprintf(mqttTopicCommand, sizeof(mqttTopicCommand), "%s/%s/base/%s",
              MQTT_TOPIC_NAMESPACE, baseMacTopicId, MQTT_TOPIC_COMMAND_SUFFIX);
-    snprintf(mqttTopicCommandResult, sizeof(mqttTopicCommandResult),
-             "%s/%s/base/%s", MQTT_TOPIC_NAMESPACE, baseMacTopicId,
+    snprintf(mqttTopicCommandResult,
+             sizeof(mqttTopicCommandResult),
+             "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE,
+             baseMacTopicId,
              MQTT_TOPIC_COMMAND_RESULT_SUFFIX);
-    snprintf(mqttTopicRoverEcefPrefix, sizeof(mqttTopicRoverEcefPrefix),
-             "%s/%s/base/%s", MQTT_TOPIC_NAMESPACE, baseMacTopicId,
+    snprintf(mqttTopicRoverEcefPrefix,
+             sizeof(mqttTopicRoverEcefPrefix),
+             "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE,
+             baseMacTopicId,
              MQTT_TOPIC_ROVERS_SUFFIX);
     Serial.printf("[BASE][MQTT] topic_root=%s/%s/base\n",
-                  MQTT_TOPIC_NAMESPACE, baseMacTopicId);
+                  MQTT_TOPIC_NAMESPACE,
+                  baseMacTopicId);
     return true;
 }
 
@@ -936,8 +944,8 @@ const char* gnssCommandStatusText(const BaseGnssCommandResultEvent& result)
         return "response_timeout";
     }
     switch (result.status) {
-    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_SEQUENCE_WRITTEN:
-        return "uart_sequence_written";
+    case RTCM_ESPNOW_GNSS_COMMAND_STATUS_VERIFIED:
+        return "verified";
     case RTCM_ESPNOW_GNSS_COMMAND_STATUS_REJECTED:
         return "rejected";
     case RTCM_ESPNOW_GNSS_COMMAND_STATUS_UART_ERROR:

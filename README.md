@@ -48,7 +48,7 @@ Trong phiên bản thử nghiệm hiện tại Base không nhận correction t�
 - Mặc định dùng ESP-NOW LR 250 Kbps để ưu tiên tầm xa.
 - Base gửi unicast tới các MAC Rover đã pair và lưu trong NVS/Preferences.
 - Không còn MAC Rover hard-code trong firmware. Nếu NVS chưa có Rover đã pair, Base vẫn khởi động ESP-NOW để chờ pairing nhưng chưa gửi RTCM runtime cho peer nào.
-- Có thể bật mã hóa PMK/LMK sau khi Base/Rover đã chạy ổn định.
+- Runtime unicast Base/Rover/Relay dùng ESP-NOW CCMP với PMK/LMK đã provision; broadcast pairing chỉ mở khi giữ nút vật lý.
 
 ### Kiến trúc broadcast discovery -> unicast
 
@@ -188,9 +188,9 @@ inline constexpr uint32_t RTCM_MAX_QUEUE_AGE_MS = 1000;
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
 inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
 
-inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
-inline constexpr uint8_t ESPNOW_PMK[16] = {0};
-inline constexpr uint8_t ESPNOW_LMK[16] = {0};
+inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = ESPNOW_SECURITY_ENABLED != 0;
+inline constexpr uint8_t ESPNOW_PMK[16] = {ESPNOW_PMK_BYTES};
+inline constexpr uint8_t ESPNOW_LMK[16] = {ESPNOW_LMK_BYTES};
 
 inline constexpr bool DEBUG_GNSS_UART_RAW_DUMP = false;
 inline constexpr bool DEBUG_RTCM_HEX_DUMP = false;
@@ -405,6 +405,18 @@ Sửa file local `include/Network_Secrets.h` (file này đã được `.gitignor
 
 Mẫu cấu hình được lưu tại `include/Network_Secrets.example.h`. Router phải được đặt cố định channel `6`, trùng `ESPNOW_WIFI_CHANNEL` trên Base và Rover. Nếu router ở channel khác, firmware không đổi channel ESP-NOW để chạy theo router mà sẽ tiếp tục retry Wi-Fi trên channel 6.
 
+### Provision bảo mật ESP-NOW
+
+Chạy từ project Base để sinh PMK/LMK 128-bit bằng CSPRNG và ghi cùng bộ khóa vào file local bị Git ignore của cả Base và Rover:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Provision-EspNowSecurity.ps1
+```
+
+Script tạo `include/EspNow_Secrets.h`, đặt `ESPNOW_SECURITY_ENABLED=1` và chỉ in fingerprint để đối chiếu, không in khóa. Muốn xoay khóa có chủ đích, chạy lại với `-Force`. Sau khi provision hoặc rotate, phải build/nạp lại **tất cả** Base, Rover và Relay bằng cùng bộ khóa; thiết bị dùng khóa cũ sẽ không trao đổi runtime unicast được. Danh sách MAC đã pair trong NVS vẫn dùng lại được.
+
+Firmware gọi `esp_now_set_pmk()` trước khi thêm peer và gắn LMK cho mọi peer runtime. Broadcast discovery cùng peer tạm dùng cho `PAIR_RESPONSE`/`PAIR_CONFIRM` vẫn không mã hóa theo giới hạn của ESP-NOW; cửa sổ pairing chỉ được mở bằng nút vật lý. Build sẽ dừng bằng `static_assert` nếu bật mã hóa nhưng PMK/LMK rỗng, lặp hoặc trùng nhau.
+
 Build/nạp bản Wi-Fi test bằng environment mặc định:
 
 ```powershell
@@ -554,7 +566,7 @@ Rover khóa UART COM2 và ghi tuần tự 14 bước: `unlogall`, `mode base <X_
 Kết quả fixed ECEF có thêm tọa độ đã dùng:
 
 ```json
-{"transaction_id":125,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_fixed_ecef","status":"uart_sequence_written","completed_step":14,"total_steps":14,"detail_code":0,"ecef_m":{"x":-1623456.1230,"y":5734567.4560,"z":2267890.7890},"result_age_ms":8}
+{"transaction_id":125,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_fixed_ecef","status":"verified","completed_step":14,"total_steps":14,"detail_code":0,"ecef_m":{"x":-1623456.1230,"y":5734567.4560,"z":2267890.7890},"result_age_ms":8}
 ```
 
 Để đưa temporary Base đầu tiên trở lại Rover, publish một transaction ID mới:
@@ -568,14 +580,14 @@ Rover ghi 4 bước: `unlogall`, `mode rover survey`, `gpgga com2 1`, `saveconfi
 Kết quả được publish lên `aitogy/<BASE_MAC>/base/command-result`:
 
 ```json
-{"transaction_id":123,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_fixed_ecef","status":"uart_sequence_written","completed_step":14,"total_steps":14,"detail_code":0,"ecef_m":{"x":-1623456.1234,"y":5734567.2345,"z":2145678.3456},"result_age_ms":8}
+{"transaction_id":123,"target_mac":"58:2A:BD:71:E4:F0","action":"switch_to_base_fixed_ecef","status":"verified","completed_step":14,"total_steps":14,"detail_code":0,"ecef_m":{"x":-1623456.1234,"y":5734567.2345,"z":2145678.3456},"result_age_ms":8}
 ```
 
-`uart_sequence_written` chỉ xác nhận ESP32 Rover đã ghi đủ 14 lệnh Fixed ECEF vào UART. Base chỉ chuyển nguồn correction sau guard và hai chu kỳ RTCM hợp lệ; trước đó các Rover còn lại vẫn dùng RTCM local. Sau kết quả này Rover ngừng nhận RTCM và chuyển COM2 sang pipeline RTCM uplink về Base gốc. Trạng thái chuyển vai trò hiện ở RAM và mất khi reset ESP32.
+`verified` xác nhận Rover đã nhận `OK` cho từng lệnh và `SAVECONFIG`, sau đó reset UM980/UM982, đọc lại `MODE` và kiểm tra GGA quality phù hợp. Base chỉ chuyển nguồn correction sau guard và hai chu kỳ RTCM hợp lệ; trước đó các Rover còn lại vẫn dùng RTCM local. Sau kết quả này Rover ngừng nhận RTCM và chuyển COM2 sang pipeline RTCM uplink về Base gốc.
 
 Kết quả `switch_to_rover` dùng cùng topic/schema nhưng có `action="switch_to_rover"`, `completed_step=4` và `total_steps=4`. Firmware chỉ bật lại RTCM sau result thành công.
 
-Base chờ result tối đa 10 giây và retry request một lần. Rover nhớ transaction hoàn tất gần nhất để request lặp chỉ trả lại result, không ghi lại chuỗi lệnh. MQTT hiện dùng TCP 1883 và ESP-NOW encryption mặc định còn tắt, vì vậy đây là bản test trong mạng tin cậy.
+Base chờ result tối đa 10 giây và retry request một lần. Rover nhớ transaction hoàn tất gần nhất để request lặp chỉ trả lại result, không ghi lại chuỗi lệnh. ESP-NOW runtime đã dùng PMK/LMK provisioned; MQTT hiện vẫn dùng TCP 1883 không TLS nên đường Internet/MQTT chỉ phù hợp mạng tin cậy cho tới khi triển khai TLS.
 
 Bản hiện tại dùng MQTT TCP port `1883` để thử nghiệm trong mạng tin cậy, chưa bật TLS. Khi dùng server thực tế qua Internet cần bổ sung TLS/xác thực chứng chỉ trước khi triển khai.
 
@@ -935,7 +947,7 @@ pio run -e esp32u_4g_uart_gateway
 
 - Đã triển khai remote command V1 để Base parse JSON MQTT, chọn Rover trực tiếp đã pair và gửi packet type `8` bằng ESP-NOW unicast với `network_id`, transaction ID, COM2 và auth tag. Cơ chế thời gian ban đầu đã được thay thế hoàn toàn bằng Fixed ECEF ngày 2026-07-23.
 - Đã thêm packet result type `9`, timeout 10 giây, retry request một lần, queue command/result và publish kết quả lên `aitogy/<BASE_MAC>/base/command-result`.
-- Khi Rover trả `uart_sequence_written`, Base giữ peer cho control nhưng tạm ngừng gửi RTCM tới peer đó; health log thêm `rtcm_rovers` và các counter `cmd_*`. Trạng thái này chỉ ở RAM trong V1.
+- Khi Rover trả `verified`, Base giữ peer cho control nhưng tạm ngừng gửi RTCM tới peer đó; health log thêm `rtcm_rovers` và các counter `cmd_*`.
 - Đã thêm dependency ArduinoJson để parse command theo schema và allowlist; không chuyển tiếp raw UART command từ MQTT.
 - Build xác nhận sau khi thêm hai chiều: `esp32u_base_espnow` SUCCESS, RAM 48.632/327.680 byte (14,8%), Flash 788.793/1.310.720 byte (60,2%); `esp32u_base_4g_mqtt` SUCCESS, RAM 47.560 byte (14,5%), Flash 778.469 byte (59,4%). Chưa test MQTT/UM980 trên phần cứng trong lượt này.
 - Đã thêm action `switch_to_rover`: Base gửi command ID `2`, chờ application result rồi bật lại RTCM cho peer; `command_builder.py` có thêm `build_geotek_lte_unicore_rover_config()` với cùng chuỗi 4 lệnh COM2.

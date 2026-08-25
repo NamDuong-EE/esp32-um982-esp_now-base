@@ -523,7 +523,9 @@ bool addRoverRuntimePeer(const uint8_t* mac, bool stored)
             roverPeers[index].cooldownUntilMs = 0;
             portEXIT_CRITICAL(&peerMux);
             updatePeerStats();
-            return true;
+            // Pairing temporarily configures this peer without encryption so
+            // PAIR_CONFIRM can be delivered. Always restore the runtime LMK.
+            return addEspNowPeer(mac, ESPNOW_ENCRYPTION_ENABLED);
         }
     }
 
@@ -1720,6 +1722,11 @@ void processNextGnssCommand()
 
 bool setupEspNowBase()
 {
+    if (ESPNOW_ENCRYPTION_ENABLED && !espnowSecurityKeysAreConfigured()) {
+        Serial.println("[BASE][ESP-NOW][ERROR] Encryption enabled but PMK/LMK are not provisioned");
+        return false;
+    }
+
     sendCallbackSemaphore = xSemaphoreCreateBinary();
     frameAckSemaphore = xSemaphoreCreateBinary();
     espnowSendMutex = xSemaphoreCreateMutex();
@@ -1838,9 +1845,10 @@ bool setupEspNowBase()
     Serial.printf("[WIFI] ESP-NOW fixed channel: %u\n", ESPNOW_WIFI_CHANNEL);
     updatePeerStats();
     const BaseEspnowStats setupStats = getBaseEspnowStats();
-    Serial.printf("[BASE][ESP-NOW] Ready, channel=%u, LR=%s, streamId=%u, rover_count=%lu\n",
+    Serial.printf("[BASE][ESP-NOW] Ready, channel=%u, LR=%s, security=%s, streamId=%u, rover_count=%lu\n",
                   ESPNOW_WIFI_CHANNEL,
                   ESPNOW_USE_LR_250KBPS ? "250 Kbps" : "off",
+                  ESPNOW_ENCRYPTION_ENABLED ? "CCMP" : "plaintext",
                   streamId,
                   static_cast<unsigned long>(setupStats.activeRoverCount));
 

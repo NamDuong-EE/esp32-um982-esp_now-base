@@ -71,37 +71,54 @@ bool isHexCharacter(char value)
 
 bool learnBaseIdentity(const char* topic)
 {
-    if (topic == nullptr) return false;
+    if (topic == nullptr) {
+        return false;
+    }
     char prefix[16] = {};
     snprintf(prefix, sizeof(prefix), "%s/", MQTT_TOPIC_NAMESPACE);
     const size_t prefixLength = std::strlen(prefix);
-    if (std::strncmp(topic, prefix, prefixLength) != 0) return false;
+    if (std::strncmp(topic, prefix, prefixLength) != 0) {
+        return false;
+    }
     const char* macText = topic + prefixLength;
     for (size_t index = 0; index < 12; ++index) {
-        if (!isHexCharacter(macText[index])) return false;
+        if (!isHexCharacter(macText[index])) {
+            return false;
+        }
     }
-    if (std::strncmp(macText + 12, "/base/", 6) != 0) return false;
+    if (std::strncmp(macText + 12, "/base/", 6) != 0) {
+        return false;
+    }
 
     char discoveredMac[13] = {};
     for (size_t index = 0; index < 12; ++index) {
         const char value = macText[index];
-        discoveredMac[index] = value >= 'a' && value <= 'f'
-            ? value - ('a' - 'A') : value;
+        discoveredMac[index] =
+            value >= 'a' && value <= 'f' ? value - ('a' - 'A') : value;
     }
     if (baseIdentityReady) {
         return std::strcmp(attachedBaseMac, discoveredMac) == 0;
     }
     std::memcpy(attachedBaseMac, discoveredMac, sizeof(attachedBaseMac));
     snprintf(mqttTopicStatus, sizeof(mqttTopicStatus), "%s/%s/base/%s",
-             MQTT_TOPIC_NAMESPACE, attachedBaseMac, MQTT_TOPIC_STATUS_SUFFIX);
+             MQTT_TOPIC_NAMESPACE,
+             attachedBaseMac,
+             MQTT_TOPIC_STATUS_SUFFIX);
     snprintf(mqttTopicCommand, sizeof(mqttTopicCommand), "%s/%s/base/%s",
-             MQTT_TOPIC_NAMESPACE, attachedBaseMac, MQTT_TOPIC_COMMAND_SUFFIX);
-    snprintf(mqttTopicCommandResult, sizeof(mqttTopicCommandResult),
-             "%s/%s/base/%s", MQTT_TOPIC_NAMESPACE, attachedBaseMac,
+             MQTT_TOPIC_NAMESPACE,
+             attachedBaseMac,
+             MQTT_TOPIC_COMMAND_SUFFIX);
+    snprintf(mqttTopicCommandResult,
+             sizeof(mqttTopicCommandResult),
+             "%s/%s/base/%s",
+             MQTT_TOPIC_NAMESPACE,
+             attachedBaseMac,
              MQTT_TOPIC_COMMAND_RESULT_SUFFIX);
     baseIdentityReady = true;
     Serial.printf("[4G-GW][UART] Attached Base MAC=%s topic_root=%s/%s/base\n",
-                  attachedBaseMac, MQTT_TOPIC_NAMESPACE, attachedBaseMac);
+                  attachedBaseMac,
+                  MQTT_TOPIC_NAMESPACE,
+                  attachedBaseMac);
     return true;
 }
 
@@ -298,7 +315,8 @@ void readBridge()
 
 void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
 {
-    if (topic == nullptr || !baseIdentityReady ||
+    if (topic == nullptr ||
+        !baseIdentityReady ||
         std::strcmp(topic, mqttTopicCommand) != 0) {
         return;
     }

@@ -15,4 +15,7 @@
 #define BASE_MODEM_GPRS_USER ""
 #define BASE_MODEM_GPRS_PASSWORD ""
 
+// ESP-NOW PMK/LMK are provisioned separately with tools/Provision-EspNowSecurity.ps1.
+// The generated include/EspNow_Secrets.h is shared with Rover and ignored by Git.
+
 #endif // NETWORK_SECRETS_H

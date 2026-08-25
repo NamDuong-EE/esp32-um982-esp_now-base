@@ -9,6 +9,24 @@
 #include "Network_Secrets.h"
 #endif
 
+#if __has_include("EspNow_Secrets.h")
+#include "EspNow_Secrets.h"
+#endif
+
+#ifndef ESPNOW_SECURITY_ENABLED
+#define ESPNOW_SECURITY_ENABLED 0
+#endif
+#ifndef ESPNOW_PMK_BYTES
+#define ESPNOW_PMK_BYTES \
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#endif
+#ifndef ESPNOW_LMK_BYTES
+#define ESPNOW_LMK_BYTES \
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#endif
+
 #ifndef BASE_WIFI_SSID
 #define BASE_WIFI_SSID ""
 #endif
@@ -113,9 +131,36 @@ inline constexpr uint32_t UART_GATEWAY_BAUD = 115200;
 inline constexpr uint8_t ESPNOW_WIFI_CHANNEL = 6;
 inline constexpr bool ESPNOW_USE_LR_250KBPS = true;
 
-inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = false;
-inline constexpr uint8_t ESPNOW_PMK[16] = {0};
-inline constexpr uint8_t ESPNOW_LMK[16] = {0};
+inline constexpr bool ESPNOW_ENCRYPTION_ENABLED = ESPNOW_SECURITY_ENABLED != 0;
+inline constexpr uint8_t ESPNOW_PMK[16] = {ESPNOW_PMK_BYTES};
+inline constexpr uint8_t ESPNOW_LMK[16] = {ESPNOW_LMK_BYTES};
+
+inline constexpr bool espnowSecurityKeyIsProvisioned(const uint8_t (&key)[16])
+{
+    bool anyNonZero = false;
+    bool anyNotFf = false;
+    bool anyDifferent = false;
+    for (size_t index = 0; index < sizeof(key); ++index) {
+        anyNonZero = anyNonZero || key[index] != 0x00;
+        anyNotFf = anyNotFf || key[index] != 0xFF;
+        anyDifferent = anyDifferent || key[index] != key[0];
+    }
+    return anyNonZero && anyNotFf && anyDifferent;
+}
+
+inline constexpr bool espnowSecurityKeysAreConfigured()
+{
+    bool keysAreDistinct = false;
+    for (size_t index = 0; index < sizeof(ESPNOW_PMK); ++index) {
+        keysAreDistinct = keysAreDistinct || ESPNOW_PMK[index] != ESPNOW_LMK[index];
+    }
+    return espnowSecurityKeyIsProvisioned(ESPNOW_PMK) &&
+           espnowSecurityKeyIsProvisioned(ESPNOW_LMK) &&
+           keysAreDistinct;
+}
+
+static_assert(!ESPNOW_ENCRYPTION_ENABLED || espnowSecurityKeysAreConfigured(),
+              "ESP-NOW encryption requires distinct provisioned 16-byte PMK/LMK values");
 
 inline constexpr uint32_t ESPNOW_SEND_TIMEOUT_MS = 250;
 inline constexpr uint8_t ESPNOW_SEND_RETRY_COUNT = 2;
