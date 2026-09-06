@@ -34,6 +34,21 @@ struct BaseRoverEcefStatus {
     bool valid = false;
 };
 
+// Snapshot for a direct or relayed Rover that has recently application-ACKed
+// an RTCM frame. GNSS telemetry is optional and joined independently.
+struct BaseOnlineRoverStatus {
+    uint8_t mac[6] = {};
+    uint8_t relayMac[6] = {};
+    bool viaRelay = false;
+    uint16_t lastAckStreamId = 0;
+    uint32_t lastAckFrameSequence = 0;
+    uint32_t lastRtcmAckAtMs = 0;
+    uint16_t correctionStreamId = 0;
+    uint8_t fixQuality = 0;
+    uint32_t fixQualityReceivedAtMs = 0;
+    bool hasFixQuality = false;
+};
+
 struct BaseRtcmSourceSnapshot {
     BaseRtcmSourceState state = BaseRtcmSourceState::LocalActive;
     uint8_t tempBaseMac[6] = {};
@@ -100,6 +115,9 @@ struct BaseEspnowStats {
     uint32_t llhStatusInvalid = 0;
     uint32_t llhStatusUnknownSource = 0;
     uint32_t llhStatusCapacityDrops = 0;
+    uint32_t relayedAckStatusReceived = 0;
+    uint32_t relayedAckStatusInvalid = 0;
+    uint32_t relayedAckStatusCapacityDrops = 0;
     uint32_t gnssCommandQueued = 0;
     uint32_t gnssCommandSent = 0;
     uint32_t gnssCommandResults = 0;
@@ -138,6 +156,11 @@ BaseEspnowStats getBaseEspnowStats();
 uint16_t getBaseEspNowStreamId();
 size_t baseEspNowCopyLatestRoverEcef(BaseRoverEcefStatus* destination,
                                      size_t capacity);
+size_t baseEspNowCopyOnlineRovers(
+    BaseOnlineRoverStatus* destination,
+    size_t capacity,
+    uint32_t now,
+    uint32_t onlineWindowMs);
 BaseGnssCommandQueueResult baseEspNowQueueFirstRoverMode(
     uint32_t transactionId,
     uint8_t targetMac[6]);

@@ -100,6 +100,13 @@ inline constexpr uint32_t MQTT_ECEF_RETRY_INTERVAL_MS = 1000;
 inline constexpr uint16_t MQTT_KEEPALIVE_SECONDS = 30;
 inline constexpr uint16_t MQTT_SOCKET_TIMEOUT_SECONDS = 2;
 inline constexpr uint16_t MQTT_BUFFER_SIZE = 1024;
+// A direct or relayed Rover is online only after it has application-ACKed an
+// RTCM frame within this interval. This is independent of GNSS telemetry age.
+inline constexpr uint32_t ESPNOW_ROVER_ONLINE_WINDOW_MS = 60000;
+// Keep each command-result payload comfortably below the MQTT packet buffer
+// after accounting for the topic name and MQTT framing.
+inline constexpr uint8_t MQTT_ONLINE_ROVER_RESPONSE_CHUNK_SIZE = 2;
+inline constexpr uint8_t MQTT_ONLINE_ROVER_QUERY_QUEUE_LENGTH = 4;
 
 // SIM7600 defaults for the future 4G board. Confirm these pins against the PCB.
 inline constexpr int MODEM_RX_PIN = 16; // ESP32 RX <- modem TX.

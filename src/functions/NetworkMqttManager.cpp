@@ -53,6 +53,14 @@ BaseGnssCommandResultEvent pendingGnssCommandResult{};
 bool hasPendingLocalCoordinateResult = false;
 BaseLocalCoordinateResult pendingLocalCoordinateResult{};
 
+struct PendingOnlineRoverQuery {
+    uint32_t transactionId = 0;
+};
+
+PendingOnlineRoverQuery
+    pendingOnlineRoverQueries[MQTT_ONLINE_ROVER_QUERY_QUEUE_LENGTH] = {};
+size_t pendingOnlineRoverQueryCount = 0;
+
 struct PendingFixedBaseCommand {
     uint8_t targetMac[6] = {};
     uint32_t transactionId = 0;
@@ -77,9 +85,13 @@ PublishedEcefState publishedEcef[ESPNOW_MAX_ECEF_SOURCES] = {};
 
 struct NetworkMqttWorkBuffers {
     BaseRoverEcefStatus snapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
+    BaseOnlineRoverStatus onlineRovers[ESPNOW_MAX_ECEF_SOURCES] = {};
     char topic[96] = {};
     char payload[768] = {};
     char commandPayload[448] = {};
+    char onlineRoverPayload[768] = {};
+    char onlineRoverMacs[ESPNOW_MAX_ECEF_SOURCES][18] = {};
+    char onlineRoverRelayMacs[ESPNOW_MAX_ECEF_SOURCES][18] = {};
     char ecefJson[128] = {};
     char correctionJson[128] = {};
     char correctedJson[128] = {};
@@ -107,6 +119,28 @@ void incrementStat(Member member)
     portENTER_CRITICAL(&statsMux);
     ++(stats.*member);
     portEXIT_CRITICAL(&statsMux);
+}
+
+bool queueOnlineRoverQuery(uint32_t transactionId)
+{
+    if (transactionId == 0 ||
+        pendingOnlineRoverQueryCount >= MQTT_ONLINE_ROVER_QUERY_QUEUE_LENGTH) {
+        return false;
+    }
+    pendingOnlineRoverQueries[pendingOnlineRoverQueryCount++] = {transactionId};
+    return true;
+}
+
+void removeFirstOnlineRoverQuery()
+{
+    if (pendingOnlineRoverQueryCount == 0) {
+        return;
+    }
+    for (size_t index = 1; index < pendingOnlineRoverQueryCount; ++index) {
+        pendingOnlineRoverQueries[index - 1] = pendingOnlineRoverQueries[index];
+    }
+    --pendingOnlineRoverQueryCount;
+    pendingOnlineRoverQueries[pendingOnlineRoverQueryCount] = {};
 }
 
 bool initializeMqttTopics()
@@ -413,6 +447,22 @@ void mqttCallback(char* topic, uint8_t* payload, unsigned int length)
         std::strcmp(action, "set_local_base_coordinates") == 0;
     const bool clearLocalCoordinates =
         std::strcmp(action, "clear_local_base_coordinates") == 0;
+    const bool getOnlineRovers = std::strcmp(action, "get_online_rovers") == 0;
+    if (getOnlineRovers) {
+        const uint32_t transactionId = document["transaction_id"] | 0U;
+        if (transactionId == 0 || !queueOnlineRoverQuery(transactionId)) {
+            incrementStat(&NetworkMqttStats::commandsRejected);
+            Serial.printf("[BASE][MQTT][ONLINE_ROVERS][REJECT] txn=%lu result=%s\n",
+                          static_cast<unsigned long>(transactionId),
+                          transactionId == 0 ? "transaction_id_required"
+                                             : "query_queue_full");
+            return;
+        }
+        incrementStat(&NetworkMqttStats::onlineRoverQueriesQueued);
+        Serial.printf("[BASE][MQTT][ONLINE_ROVERS] Queued txn=%lu\n",
+                      static_cast<unsigned long>(transactionId));
+        return;
+    }
     if (!switchToBaseFixed && !switchToRover && !setLocalCoordinates &&
         !clearLocalCoordinates) {
         incrementStat(&NetworkMqttStats::commandsRejected);
@@ -1084,6 +1134,117 @@ void publishGnssCommandResult(uint32_t now)
                   gnssCommandStatusText(pendingGnssCommandResult));
     hasPendingGnssCommandResult = false;
 }
+
+void publishOnlineRoverResult(uint32_t now)
+{
+    if (pendingOnlineRoverQueryCount == 0) {
+        return;
+    }
+
+    const PendingOnlineRoverQuery query = pendingOnlineRoverQueries[0];
+    const size_t onlineCount = baseEspNowCopyOnlineRovers(
+        workBuffers.onlineRovers,
+        ESPNOW_MAX_ECEF_SOURCES,
+        now,
+        ESPNOW_ROVER_ONLINE_WINDOW_MS);
+    const size_t chunkCount = onlineCount == 0
+                                  ? 1
+                                  : (onlineCount +
+                                     MQTT_ONLINE_ROVER_RESPONSE_CHUNK_SIZE - 1) /
+                                        MQTT_ONLINE_ROVER_RESPONSE_CHUNK_SIZE;
+
+    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+        const size_t start =
+            chunkIndex * MQTT_ONLINE_ROVER_RESPONSE_CHUNK_SIZE;
+        const size_t end = min(onlineCount,
+                               start + MQTT_ONLINE_ROVER_RESPONSE_CHUNK_SIZE);
+
+        JsonDocument response;
+        JsonObject root = response.to<JsonObject>();
+        root["transaction_id"] = query.transactionId;
+        root["action"] = "get_online_rovers";
+        root["status"] = "ok";
+        root["window_ms"] = ESPNOW_ROVER_ONLINE_WINDOW_MS;
+        root["total_online"] = onlineCount;
+        root["chunk_index"] = chunkIndex;
+        root["chunk_count"] = chunkCount;
+        JsonArray rovers = root["rovers"].to<JsonArray>();
+
+        for (size_t index = start; index < end; ++index) {
+            const BaseOnlineRoverStatus& rover =
+                workBuffers.onlineRovers[index];
+            snprintf(workBuffers.onlineRoverMacs[index],
+                     sizeof(workBuffers.onlineRoverMacs[index]),
+                     "%02X:%02X:%02X:%02X:%02X:%02X",
+                     rover.mac[0], rover.mac[1], rover.mac[2],
+                     rover.mac[3], rover.mac[4], rover.mac[5]);
+            JsonObject item = rovers.add<JsonObject>();
+            item["mac"] = workBuffers.onlineRoverMacs[index];
+            item["via_relay"] = rover.viaRelay;
+            if (rover.viaRelay) {
+                snprintf(workBuffers.onlineRoverRelayMacs[index],
+                         sizeof(workBuffers.onlineRoverRelayMacs[index]),
+                         "%02X:%02X:%02X:%02X:%02X:%02X",
+                         rover.relayMac[0], rover.relayMac[1],
+                         rover.relayMac[2], rover.relayMac[3],
+                         rover.relayMac[4], rover.relayMac[5]);
+                item["relay_mac"] = workBuffers.onlineRoverRelayMacs[index];
+            } else {
+                item["relay_mac"] = nullptr;
+            }
+            if (rover.hasFixQuality) {
+                item["fix_quality"] = static_cast<unsigned>(rover.fixQuality);
+                item["fix_quality_age_ms"] =
+                    now - rover.fixQualityReceivedAtMs;
+                item["correction_stream_id"] =
+                    static_cast<unsigned>(rover.correctionStreamId);
+            } else {
+                item["fix_quality"] = nullptr;
+                item["fix_quality_age_ms"] = nullptr;
+                item["correction_stream_id"] = nullptr;
+            }
+            item["last_rtcm_ack_age_ms"] = now - rover.lastRtcmAckAtMs;
+        }
+
+        const size_t payloadLength = measureJson(response);
+        // PubSubClient's buffer must also contain the topic and MQTT packet
+        // header. Leave an eight-byte margin for MQTT variable-length fields.
+        if (payloadLength + strlen(mqttTopicCommandResult) + 8 >=
+                MQTT_BUFFER_SIZE ||
+            payloadLength + 1 > sizeof(workBuffers.onlineRoverPayload)) {
+            incrementStat(&NetworkMqttStats::commandResultPublishFailures);
+            Serial.printf("[BASE][MQTT][ONLINE_ROVERS][ERROR] txn=%lu "
+                          "chunk=%u payload_too_large bytes=%u\n",
+                          static_cast<unsigned long>(query.transactionId),
+                          static_cast<unsigned>(chunkIndex),
+                          static_cast<unsigned>(payloadLength));
+            return;
+        }
+        serializeJson(response,
+                      workBuffers.onlineRoverPayload,
+                      sizeof(workBuffers.onlineRoverPayload));
+        if (!mqtt.publish(mqttTopicCommandResult,
+                          workBuffers.onlineRoverPayload,
+                          false)) {
+            incrementStat(&NetworkMqttStats::commandResultPublishFailures);
+            Serial.printf("[BASE][MQTT][ONLINE_ROVERS][WARN] Publish failed "
+                          "txn=%lu chunk=%u\n",
+                          static_cast<unsigned long>(query.transactionId),
+                          static_cast<unsigned>(chunkIndex));
+            return;
+        }
+        incrementStat(&NetworkMqttStats::commandResultsPublished);
+        incrementStat(&NetworkMqttStats::onlineRoverResultsPublished);
+        Serial.printf("[BASE][MQTT][ONLINE_ROVERS] Published txn=%lu "
+                      "chunk=%u/%u online=%u\n",
+                      static_cast<unsigned long>(query.transactionId),
+                      static_cast<unsigned>(chunkIndex + 1),
+                      static_cast<unsigned>(chunkCount),
+                      static_cast<unsigned>(onlineCount));
+    }
+
+    removeFirstOnlineRoverQuery();
+}
 }
 
 void setupNetworkMqtt()
@@ -1201,6 +1362,7 @@ void networkMqttLoop()
     if (mqtt.connected()) {
         publishLocalCoordinateResult(now);
         publishGnssCommandResult(now);
+        publishOnlineRoverResult(now);
         publishLatestRoverEcef(now);
     }
 }

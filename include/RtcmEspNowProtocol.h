@@ -17,6 +17,7 @@ inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_REQUEST = 8;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_GNSS_COMMAND_RESULT = 9;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_TEMP_RTCM_DATA = 10;
 inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_TEMP_RTCM_ACK = 11;
+inline constexpr uint8_t RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_RTCM_ACK_STATUS = 12;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_BASE = 1;
 inline constexpr uint8_t RTCM_ESPNOW_ROLE_ROVER = 2;
 inline constexpr uint8_t RTCM_ESPNOW_GNSS_COMMAND_SWITCH_TO_ROVER = 2;
@@ -100,6 +101,14 @@ struct RelayedRoverEcefStatusPacket {
     int64_t ecefZScaled;
 };
 
+struct RelayedRoverRtcmAckStatusPacket {
+    RtcmEspNowCommonHeader common;
+    uint8_t roverMac[6];
+    uint16_t streamId;
+    uint32_t frameSequence;
+    uint32_t ackAgeMs;
+};
+
 struct GnssCommandRequestPacket {
     RtcmEspNowCommonHeader common;
     uint32_t networkId;
@@ -166,6 +175,8 @@ static_assert(sizeof(RoverEcefStatusPacket) == 40,
               "ROVER_ECEF_STATUS must be 40 bytes");
 static_assert(sizeof(RelayedRoverEcefStatusPacket) == 48,
               "RELAYED_ROVER_ECEF_STATUS must be 48 bytes");
+static_assert(sizeof(RelayedRoverRtcmAckStatusPacket) == 20,
+              "RELAYED_ROVER_RTCM_ACK_STATUS must be 20 bytes");
 static_assert(sizeof(GnssCommandRequestPacket) == 44,
               "GNSS_COMMAND_REQUEST must be 44 bytes");
 static_assert(sizeof(GnssCommandResultPacket) == 24,
@@ -320,6 +331,24 @@ inline bool rtcmEspNowValidateRelayedRoverEcefStatus(
                                packet.ecefYScaled,
                                packet.ecefZScaled) &&
            packet.fixQuality <= 8;
+}
+
+inline bool rtcmEspNowValidateRelayedRoverRtcmAckStatus(
+    const RelayedRoverRtcmAckStatusPacket& packet,
+    size_t receivedLength)
+{
+    bool macConfigured = false;
+    bool macBroadcast = true;
+    for (uint8_t octet : packet.roverMac) {
+        macConfigured = macConfigured || octet != 0;
+        macBroadcast = macBroadcast && octet == 0xFF;
+    }
+    return receivedLength == sizeof(RelayedRoverRtcmAckStatusPacket) &&
+           packet.common.magic == RTCM_ESPNOW_MAGIC &&
+           packet.common.version == RTCM_ESPNOW_VERSION &&
+           packet.common.packetType ==
+               RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_RTCM_ACK_STATUS &&
+           macConfigured && !macBroadcast && (packet.roverMac[0] & 0x01U) == 0;
 }
 
 inline bool rtcmEspNowValidateGnssCommandRequest(

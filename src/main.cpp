@@ -444,6 +444,7 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
             "signal_dbm=%ld network_attempt=%lu mqtt_attempt=%lu mqtt_connect=%lu "
             "mqtt_disconnect=%lu ecef_published=%lu ecef_publish_fail=%lu "
             "ecef_publish_age_ms=%lu cmd_rx=%lu cmd_reject=%lu "
+            "online_rover_query=%lu online_rover_result=%lu "
             "cmd_result_pub=%lu cmd_result_pub_fail=%lu stack_hwm_bytes=%lu\n",
             networkTransportName(),
             network.configured ? 1U : 0U,
@@ -461,6 +462,8 @@ void dumpRtcmFrameHex(const char* label, const uint8_t* frame, size_t frameLengt
                                            : now - network.lastLlhPublishedAtMs),
             static_cast<unsigned long>(network.commandsReceived),
             static_cast<unsigned long>(network.commandsRejected),
+            static_cast<unsigned long>(network.onlineRoverQueriesQueued),
+            static_cast<unsigned long>(network.onlineRoverResultsPublished),
             static_cast<unsigned long>(network.commandResultsPublished),
             static_cast<unsigned long>(network.commandResultPublishFailures),
             static_cast<unsigned long>(network.stackHighWaterBytes));

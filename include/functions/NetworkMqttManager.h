@@ -17,6 +17,8 @@ struct NetworkMqttStats {
     uint32_t lastLlhPublishedAtMs = 0;
     uint32_t commandsReceived = 0;
     uint32_t commandsRejected = 0;
+    uint32_t onlineRoverQueriesQueued = 0;
+    uint32_t onlineRoverResultsPublished = 0;
     uint32_t commandResultsPublished = 0;
     uint32_t commandResultPublishFailures = 0;
     uint32_t stackHighWaterBytes = 0;

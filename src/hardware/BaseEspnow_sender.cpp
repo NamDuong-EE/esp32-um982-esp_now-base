@@ -31,6 +31,18 @@ struct RoverPeer {
     bool rtcmEnabled;
     uint8_t consecutiveFrameFailures;
     uint32_t cooldownUntilMs;
+    uint16_t lastAckStreamId;
+    uint32_t lastAckFrameSequence;
+    uint32_t lastRtcmAckAtMs;
+};
+
+struct RelayedRoverAckState {
+    uint8_t roverMac[6];
+    uint8_t relayMac[6];
+    uint16_t streamId;
+    uint32_t frameSequence;
+    uint32_t lastRtcmAckAtMs;
+    bool valid;
 };
 
 struct QueuedGnssCommand {
@@ -85,10 +97,12 @@ struct DeferredTempAckState {
 BaseEspnowStats stats;
 RoverPeer roverPeers[ESPNOW_MAX_PAIRED_ROVERS] = {};
 BaseRoverEcefStatus latestRoverEcef[ESPNOW_MAX_ECEF_SOURCES] = {};
+RelayedRoverAckState relayedRoverAcks[ESPNOW_MAX_ECEF_SOURCES] = {};
 size_t roverPeerCount = 0;
 portMUX_TYPE statsMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE peerMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE ecefMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE relayedAckMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE pairingMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE sourceMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE resetMux = portMUX_INITIALIZER_UNLOCKED;
@@ -636,6 +650,45 @@ bool storeLatestRoverEcef(const uint8_t* roverMac,
     return true;
 }
 
+bool storeRelayedRoverAck(const uint8_t* roverMac,
+                          const uint8_t* relayMac,
+                          uint16_t streamIdValue,
+                          uint32_t frameSequenceValue,
+                          uint32_t ackAgeMs)
+{
+    size_t selectedIndex = ESPNOW_MAX_ECEF_SOURCES;
+    size_t freeIndex = ESPNOW_MAX_ECEF_SOURCES;
+    portENTER_CRITICAL(&relayedAckMux);
+    for (size_t index = 0; index < ESPNOW_MAX_ECEF_SOURCES; ++index) {
+        if (relayedRoverAcks[index].valid &&
+            macEquals(relayedRoverAcks[index].roverMac, roverMac)) {
+            selectedIndex = index;
+            break;
+        }
+        if (!relayedRoverAcks[index].valid &&
+            freeIndex == ESPNOW_MAX_ECEF_SOURCES) {
+            freeIndex = index;
+        }
+    }
+    if (selectedIndex == ESPNOW_MAX_ECEF_SOURCES) {
+        selectedIndex = freeIndex;
+    }
+    if (selectedIndex == ESPNOW_MAX_ECEF_SOURCES) {
+        portEXIT_CRITICAL(&relayedAckMux);
+        return false;
+    }
+
+    RelayedRoverAckState& state = relayedRoverAcks[selectedIndex];
+    std::memcpy(state.roverMac, roverMac, sizeof(state.roverMac));
+    std::memcpy(state.relayMac, relayMac, sizeof(state.relayMac));
+    state.streamId = streamIdValue;
+    state.frameSequence = frameSequenceValue;
+    state.lastRtcmAckAtMs = millis() - ackAgeMs;
+    state.valid = true;
+    portEXIT_CRITICAL(&relayedAckMux);
+    return true;
+}
+
 size_t copyRoverPeers(RoverPeer* destination, size_t capacity)
 {
     portENTER_CRITICAL(&peerMux);
@@ -993,6 +1046,14 @@ void setRoverRtcmEnabled(const uint8_t* mac, bool enabled)
         if (macEquals(roverPeers[index].mac, mac)) {
             changed = roverPeers[index].rtcmEnabled != enabled;
             roverPeers[index].rtcmEnabled = enabled;
+            if (changed) {
+                // Do not reuse an ACK from a previous RTCM delivery state.
+                // A peer becomes online again only after a new RTCM frame is
+                // delivered and application-ACKed.
+                roverPeers[index].lastAckStreamId = 0;
+                roverPeers[index].lastAckFrameSequence = 0;
+                roverPeers[index].lastRtcmAckAtMs = 0;
+            }
             if (enabled) {
                 roverPeers[index].consecutiveFrameFailures = 0;
                 roverPeers[index].cooldownUntilMs = 0;
@@ -1042,7 +1103,10 @@ bool peerCooldownActive(const RoverPeer& peer, uint32_t now)
            static_cast<int32_t>(now - peer.cooldownUntilMs) < 0;
 }
 
-void recordPeerDeliveryResult(const uint8_t* mac, bool delivered)
+void recordPeerDeliveryResult(const uint8_t* mac,
+                              bool delivered,
+                              uint16_t acknowledgedStreamId,
+                              uint32_t acknowledgedFrameSequence)
 {
     bool enteredCooldown = false;
     bool recovered = false;
@@ -1061,6 +1125,9 @@ void recordPeerDeliveryResult(const uint8_t* mac, bool delivered)
                         peer.cooldownUntilMs != 0;
             peer.consecutiveFrameFailures = 0;
             peer.cooldownUntilMs = 0;
+            peer.lastAckStreamId = acknowledgedStreamId;
+            peer.lastAckFrameSequence = acknowledgedFrameSequence;
+            peer.lastRtcmAckAtMs = now;
         } else {
             if (peer.consecutiveFrameFailures < UINT8_MAX) {
                 ++peer.consecutiveFrameFailures;
@@ -1210,6 +1277,34 @@ void onDataReceived(const uint8_t* sourceMac, const uint8_t* data, int length)
         }
         incrementStat(&BaseEspnowStats::llhStatusReceived);
         incrementStat(&BaseEspnowStats::llhStatusRelayedReceived);
+        return;
+    }
+
+    if (common.packetType ==
+        RTCM_ESPNOW_PACKET_TYPE_RELAYED_ROVER_RTCM_ACK_STATUS) {
+        if (length !=
+            static_cast<int>(sizeof(RelayedRoverRtcmAckStatusPacket))) {
+            incrementStat(&BaseEspnowStats::relayedAckStatusInvalid);
+            return;
+        }
+        RelayedRoverRtcmAckStatusPacket packet{};
+        std::memcpy(&packet, data, sizeof(packet));
+        size_t ignoredIndex = 0;
+        if (!findRoverPeerIndex(sourceMac, ignoredIndex) ||
+            !rtcmEspNowValidateRelayedRoverRtcmAckStatus(packet,
+                                                         sizeof(packet))) {
+            incrementStat(&BaseEspnowStats::relayedAckStatusInvalid);
+            return;
+        }
+        if (!storeRelayedRoverAck(packet.roverMac,
+                                  sourceMac,
+                                  packet.streamId,
+                                  packet.frameSequence,
+                                  packet.ackAgeMs)) {
+            incrementStat(&BaseEspnowStats::relayedAckStatusCapacityDrops);
+            return;
+        }
+        incrementStat(&BaseEspnowStats::relayedAckStatusReceived);
         return;
     }
 
@@ -1980,7 +2075,10 @@ bool baseEspNowSendRtcmFrame(const uint8_t* frame, size_t length)
                                                length,
                                                currentStreamId,
                                                currentSequence);
-        recordPeerDeliveryResult(peers[index].mac, delivered);
+        recordPeerDeliveryResult(peers[index].mac,
+                                 delivered,
+                                 currentStreamId,
+                                 currentSequence);
         if (!delivered) {
             allPeersAcked = false;
             Serial.printf("[BASE][ESP-NOW][ERROR] Drop seq=%lu for peer=%s without application ACK\n",
@@ -2113,6 +2211,106 @@ size_t baseEspNowCopyLatestRoverEcef(BaseRoverEcefStatus* destination,
     }
     portEXIT_CRITICAL(&ecefMux);
     return count;
+}
+
+size_t baseEspNowCopyOnlineRovers(
+    BaseOnlineRoverStatus* destination,
+    size_t capacity,
+    uint32_t now,
+    uint32_t onlineWindowMs)
+{
+    if (destination == nullptr || capacity == 0 || onlineWindowMs == 0) {
+        return 0;
+    }
+
+    RoverPeer peers[ESPNOW_MAX_PAIRED_ROVERS] = {};
+    const size_t peerCount = copyRoverPeers(peers, ESPNOW_MAX_PAIRED_ROVERS);
+    BaseRoverEcefStatus ecefSnapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
+    const size_t ecefCount = baseEspNowCopyLatestRoverEcef(
+        ecefSnapshots, ESPNOW_MAX_ECEF_SOURCES);
+
+    size_t copied = 0;
+    for (size_t peerIndex = 0;
+         peerIndex < peerCount && copied < capacity;
+         ++peerIndex) {
+        const RoverPeer& peer = peers[peerIndex];
+        if (!peer.stored || !peer.rtcmEnabled || peer.lastRtcmAckAtMs == 0 ||
+            now - peer.lastRtcmAckAtMs > onlineWindowMs) {
+            continue;
+        }
+
+        BaseOnlineRoverStatus& output = destination[copied++];
+        output = {};
+        std::memcpy(output.mac, peer.mac, sizeof(output.mac));
+        output.lastAckStreamId = peer.lastAckStreamId;
+        output.lastAckFrameSequence = peer.lastAckFrameSequence;
+        output.lastRtcmAckAtMs = peer.lastRtcmAckAtMs;
+
+        // A relayed status belongs to a child Rover and must not be used as
+        // the telemetry of the direct ESP-NOW peer queried here.
+        for (size_t ecefIndex = 0; ecefIndex < ecefCount; ++ecefIndex) {
+            const BaseRoverEcefStatus& ecef = ecefSnapshots[ecefIndex];
+            if (!ecef.valid || ecef.viaRelay || !macEquals(ecef.mac, peer.mac)) {
+                continue;
+            }
+            output.correctionStreamId = ecef.correctionStreamId;
+            output.fixQuality = ecef.fixQuality;
+            output.fixQualityReceivedAtMs = ecef.receivedAtMs;
+            output.hasFixQuality = true;
+            break;
+        }
+    }
+
+    RelayedRoverAckState relayedSnapshots[ESPNOW_MAX_ECEF_SOURCES] = {};
+    portENTER_CRITICAL(&relayedAckMux);
+    for (size_t index = 0; index < ESPNOW_MAX_ECEF_SOURCES; ++index) {
+        relayedSnapshots[index] = relayedRoverAcks[index];
+    }
+    portEXIT_CRITICAL(&relayedAckMux);
+
+    for (size_t ackIndex = 0;
+         ackIndex < ESPNOW_MAX_ECEF_SOURCES && copied < capacity;
+         ++ackIndex) {
+        const RelayedRoverAckState& ack = relayedSnapshots[ackIndex];
+        if (!ack.valid || ack.lastRtcmAckAtMs == 0 ||
+            now - ack.lastRtcmAckAtMs > onlineWindowMs) {
+            continue;
+        }
+        bool alreadyDirect = false;
+        for (size_t outputIndex = 0; outputIndex < copied; ++outputIndex) {
+            if (macEquals(destination[outputIndex].mac, ack.roverMac)) {
+                alreadyDirect = true;
+                break;
+            }
+        }
+        if (alreadyDirect) {
+            continue;
+        }
+
+        BaseOnlineRoverStatus& output = destination[copied++];
+        output = {};
+        std::memcpy(output.mac, ack.roverMac, sizeof(output.mac));
+        std::memcpy(output.relayMac, ack.relayMac, sizeof(output.relayMac));
+        output.viaRelay = true;
+        output.lastAckStreamId = ack.streamId;
+        output.lastAckFrameSequence = ack.frameSequence;
+        output.lastRtcmAckAtMs = ack.lastRtcmAckAtMs;
+
+        for (size_t ecefIndex = 0; ecefIndex < ecefCount; ++ecefIndex) {
+            const BaseRoverEcefStatus& ecef = ecefSnapshots[ecefIndex];
+            if (!ecef.valid || !ecef.viaRelay ||
+                !macEquals(ecef.mac, ack.roverMac) ||
+                !macEquals(ecef.relayMac, ack.relayMac)) {
+                continue;
+            }
+            output.correctionStreamId = ecef.correctionStreamId;
+            output.fixQuality = ecef.fixQuality;
+            output.fixQualityReceivedAtMs = ecef.receivedAtMs;
+            output.hasFixQuality = true;
+            break;
+        }
+    }
+    return copied;
 }
 
 static BaseGnssCommandQueueResult queueRoverGnssCommand(

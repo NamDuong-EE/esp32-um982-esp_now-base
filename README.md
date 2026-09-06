@@ -430,8 +430,8 @@ MQTT test dùng các topic:
 |---|---|---|
 | `aitogy/<BASE_MAC>/base/status` | Base publish retained | `online`; LWT ghi `offline` |
 | `aitogy/<BASE_MAC>/base/rovers/<ROVER_MAC>/ecef` | Base publish khi nhận ECEF mới | JSON gồm ECEF raw, delta, ECEF corrected, GNSS time, fix quality và metadata nguồn |
-| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Nhận lệnh chọn Temporary Base hoặc đặt/xóa tọa độ của Base local |
-| `aitogy/<BASE_MAC>/base/command-result` | Base publish | Kết quả lệnh GNSS trên Rover hoặc đổi tọa độ Base local |
+| `aitogy/<BASE_MAC>/base/command` | Base subscribe | Nhận lệnh chọn Temporary Base, đặt/xóa tọa độ Base local, hoặc truy vấn Rover đang online |
+| `aitogy/<BASE_MAC>/base/command-result` | Base publish | Kết quả lệnh GNSS, tọa độ Base local, hoặc danh sách Rover online |
 
 Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef`:
 
@@ -440,6 +440,33 @@ Ví dụ topic `aitogy/680947F84890/base/rovers/582ABD71E4F0/ecef`:
 ```
 
 Server có thể subscribe wildcard `aitogy/+/base/rovers/+/ecef` để nhận ECEF từ mọi Base, hoặc `aitogy/<BASE_MAC>/base/rovers/+/ecef` cho một Base. Payload không có latitude, longitude, MSL height hoặc ellipsoidal height. Heartbeat định kỳ đã bị loại bỏ; Base chỉ phát status/LWT và ECEF mới.
+
+### Truy vấn Rover đang online
+
+Server publish không retained vào `aitogy/<BASE_MAC>/base/command`:
+
+```json
+{"action":"get_online_rovers","transaction_id":129}
+```
+
+`transaction_id` bắt buộc khác 0. Base trả lời ngay trên
+`aitogy/<BASE_MAC>/base/command-result`, cũng không retained. Một peer được
+tính online khi đã trả application ACK hợp lệ cho một RTCM frame trong 60.000 ms
+gần nhất. Với peer trực tiếp, Base nhận ACK đó; với Rover con, Relay nhận ACK rồi
+gửi báo cáo bổ sung lên Base. ACK chỉ xuất hiện sau khi RTCM đã được ghép, kiểm
+CRC và ghi xuống UART GNSS thành công.
+
+Ví dụ kết quả:
+
+```json
+{"transaction_id":129,"action":"get_online_rovers","status":"ok","window_ms":60000,"total_online":2,"chunk_index":0,"chunk_count":1,"rovers":[{"mac":"58:2A:BD:71:E4:F0","via_relay":false,"relay_mac":null,"fix_quality":4,"fix_quality_age_ms":235,"correction_stream_id":32100,"last_rtcm_ack_age_ms":84},{"mac":"7C:DF:A1:11:22:33","via_relay":true,"relay_mac":"68:09:47:9E:8C:08","fix_quality":5,"fix_quality_age_ms":410,"correction_stream_id":32100,"last_rtcm_ack_age_ms":1280}]}
+```
+
+- `fix_quality` là giá trị GGA mới nhất: `4` RTK fixed, `5` RTK float; các giá trị khác được giữ nguyên theo GNSS. Nếu Base chưa nhận ECEF/GGA trực tiếp mới từ Rover thì `fix_quality`, `fix_quality_age_ms`, và `correction_stream_id` là `null`, nhưng Rover vẫn có thể online theo ACK RTCM.
+- `last_rtcm_ack_age_ms` là bằng chứng tuổi của ACK RTCM Base đã xác thực; server nên dùng trường này để quyết định online, không dùng riêng `fix_quality`.
+- `via_relay` cho biết đường truyền; `relay_mac` là `null` với peer trực tiếp và là MAC Relay với Rover con. Nếu một MAC đồng thời có ACK trực tiếp và qua Relay còn hạn, Base ưu tiên bản ghi trực tiếp để tránh trùng.
+- `chunk_index` bắt đầu từ 0. Base gửi tối đa 2 Rover mỗi chunk để không vượt MQTT buffer; server ghép đủ `chunk_count` theo `transaction_id`.
+- Relay gửi packet `RELAYED_ROVER_RTCM_ACK_STATUS` (type 12, 20 byte) tối đa một lần mỗi Rover con mỗi 5 giây. Packet mang MAC Rover, `streamId`, `frameSequence` và tuổi ACK tại lúc gửi, nên thời gian chờ trên Relay không làm ACK trông mới hơn thực tế.
 
 ### Đặt tọa độ Base local qua MQTT
 
